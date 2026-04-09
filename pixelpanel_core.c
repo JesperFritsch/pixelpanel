@@ -251,7 +251,7 @@ err:
 }
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(6, 8, 0)
 static void pp_remove(struct platform_device *dev)
 #else
 static int pp_remove(struct platform_device *dev)
