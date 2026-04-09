@@ -250,16 +250,22 @@ err:
 }
 
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
 static void pp_remove(struct platform_device *dev)
+#else
+static int pp_remove(struct platform_device *dev)
+#endif
 {
-	struct fb_info *info = platform_get_drvdata(dev);
+    struct fb_info *info = platform_get_drvdata(dev);
 
-	if (info) {
-		unregister_framebuffer(info);
-		vfree(videomemory);
-		framebuffer_release(info);
-	}
-    pr_info("pixelpanel: removed\n");
+    if (info) {
+        unregister_framebuffer(info);
+        vfree(videomemory);
+        framebuffer_release(info);
+    }
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+    return 0;
+#endif
 }
 
 
