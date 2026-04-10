@@ -88,15 +88,28 @@ static int gpio_map_init(void)
     struct resource res;
 
     soc = of_find_compatible_node(NULL, NULL, "brcm,bcm2835-gpio");
-    if (soc) {
-        of_address_to_resource(soc, 0, &res);
-        gpio_base = ioremap(res.start, resource_size(&res));
-        of_node_put(soc);
-    }
-    if (!gpio_base) {
-        pr_err("failed to map GPIO registers\n");
+    if (!soc) {
+        pr_err("could not find GPIO node in device tree\n");
         return -ENXIO;
     }
+
+    if (of_address_to_resource(soc, 0, &res)) {
+        pr_err("could not get GPIO resource\n");
+        of_node_put(soc);
+        return -ENXIO;
+    }
+
+    pr_info("GPIO resource: %pR\n", &res);
+
+    gpio_base = ioremap(res.start, resource_size(&res));
+    of_node_put(soc);
+
+    if (!gpio_base) {
+        pr_err("failed to ioremap GPIO registers\n");
+        return -ENXIO;
+    }
+
+    pr_info("GPIO mapped at %p\n", gpio_base);
     return 0;
 }
 
@@ -335,7 +348,8 @@ void pp_renderer_stop(void)
         kthread_stop(refresh_thread);
         refresh_thread = NULL;
     }
-    gpio_set_bits(BIT(gpio_oe));  /* turn off display */
+    if (gpio_base)
+        gpio_set_bits(BIT(gpio_oe));
 }
 
 
