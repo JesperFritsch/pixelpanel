@@ -217,7 +217,7 @@ static int pp_probe(struct platform_device *dev)
 
     if (!(width && height))
     {
-        pr_err("%s: width and height must be set\n", KBUILD_MODNAME);
+        pr_err("width and height must be set\n");
         return -EINVAL;
     }
 
