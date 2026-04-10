@@ -1,3 +1,4 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/init.h>
 #include <linux/version.h>
@@ -10,7 +11,6 @@
 #include <linux/mm.h>
 #include <linux/of.h>
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jesper Fritsch");
@@ -308,9 +308,11 @@ static struct platform_driver pp_driver = {
 	.probe	= pp_probe,
 	.remove = pp_remove,
 	.driver = {
-		.name	= KBUILD_MODNAME,
+		.name	        = KBUILD_MODNAME,
+        .of_match_table = pp_of_match,
 	},
 };
+
 
 static struct platform_device *pp_device;
 
