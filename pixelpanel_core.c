@@ -1,3 +1,4 @@
+
 #include <linux/init.h>
 #include <linux/version.h>
 #include <linux/module.h>
@@ -9,31 +10,46 @@
 #include <linux/mm.h>
 #include <linux/of.h>
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jesper Fritsch");
 MODULE_DESCRIPTION("Framebuffer driver mainly for LED displays (HUB75, ...)");
 
-#define DEVICE_NAME "pixelpanel"
-uint width = 0;
-uint height = 0;
-uint pp_renderer_type = 0;
-
-module_param(width, uint, 0);
-module_param(height, uint, 0);
-MODULE_PARM_DESC(width, "Display width in pixels");
-MODULE_PARM_DESC(height, "Display height in pixels");
-
+static uint width = 0;
+static uint height = 0;
+static uint v_width = 0;
+static uint v_height = 0;
 static void *videomemory;
 static u_long videomemorysize;
 
-module_param(videomemorysize, ulong, 0);
-MODULE_PARM_DESC(videomemorysize, "RAM available to frame buffer (in bytes)");
+module_param(width, uint, 0);
+MODULE_PARM_DESC(width, "Actual display width in pixels");
+
+module_param(height, uint, 0);
+MODULE_PARM_DESC(height, "Actual Display height in pixels");
+
+module_param(v_width, uint, 0);
+MODULE_PARM_DESC(v_width, "Virtual display width in pixels");
+
+module_param(v_height, uint, 0);
+MODULE_PARM_DESC(v_height, "Virtual display height in pixels");
+
+
+static const struct of_device_id pp_of_match[] = {
+    { .compatible = "jfritsch,pixelpanel-hub75" },
+    {},
+};
+
+MODULE_DEVICE_TABLE(of, pp_of_match);
 
 
 static struct fb_fix_screeninfo pp_fix_si = {
-    .id = DEVICE_NAME,
+    .id = KBUILD_MODNAME,
     .type = FB_TYPE_PACKED_PIXELS,
-    .accel = FB_ACCEL_NONE
+    .accel = FB_ACCEL_NONE,
+    .xpanstep = 1,
+    .ypanstep = 1
 };
 
 
@@ -157,12 +173,19 @@ static int pp_mmap(struct fb_info *info, struct vm_area_struct *vma)
 }
 
 
+static int pp_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+    return 0;
+}
+
+
 static const struct fb_ops pp_ops = {
 	.owner		= THIS_MODULE,
 	__FB_DEFAULT_SYSMEM_OPS_RDWR,
 	.fb_check_var	= pp_check_var,
 	.fb_set_par	= pp_set_par,
 	.fb_setcolreg	= pp_setcolreg,
+    .fb_pan_display = pp_pan_display,
 	__FB_DEFAULT_SYSMEM_OPS_DRAW,
 	.fb_mmap	= pp_mmap,
 };
@@ -173,6 +196,7 @@ static int pp_probe(struct platform_device *dev)
 {
 	struct fb_info *info;
     unsigned int dt_width = 0, dt_height = 0;
+    unsigned int dt_v_width = 0, dt_v_height = 0;
 	unsigned int size;
 	int retval = -ENOMEM;
 
@@ -181,6 +205,8 @@ static int pp_probe(struct platform_device *dev)
     if (dev->dev.of_node) {
         of_property_read_u32(dev->dev.of_node, "width", &dt_width);
         of_property_read_u32(dev->dev.of_node, "height", &dt_height);
+        of_property_read_u32(dev->dev.of_node, "v_width", &dt_v_width);
+        of_property_read_u32(dev->dev.of_node, "v_height", &dt_v_height);
     }
 
     /* Only use DT values if module params are still at defaults */
@@ -191,13 +217,24 @@ static int pp_probe(struct platform_device *dev)
 
     if (!(width && height))
     {
-        pr_err("%s: width and height must be set\n", DEVICE_NAME);
+        pr_err("%s: width and height must be set\n", KBUILD_MODNAME);
         return -EINVAL;
     }
 
-    pr_info("pixelpanel: probe, %ux%u @ %dbpp\n", width, height, 32);
+    /* Make sure virtual dimensions are set and are larger or equal to actual dimensions */
+    if (v_width == 0)
+        v_width = (dt_v_width) ? dt_v_width : width;
+    if (v_height == 0)
+        v_height = (dt_v_height) ? dt_v_height : height;
 
-    videomemorysize = width * height * 4;
+    if (v_width < width)
+        v_width = width;
+    if (v_height < height)
+        v_height = height;
+
+    pr_info("probe, %ux%u (virtual %ux%u) @ %dbpp\n", width, height, v_width, v_height, 32);
+
+    videomemorysize = v_width * v_height * 4;
     size = PAGE_ALIGN(videomemorysize);
 
 	/*
@@ -206,12 +243,9 @@ static int pp_probe(struct platform_device *dev)
 	if (!(videomemory = vmalloc_32_user(size)))
 		return retval;
 
-    pr_info("pixelpanel: buffer at %p, %lu bytes\n", videomemory, videomemorysize);
-
 	info = framebuffer_alloc(sizeof(u32) * 16, &dev->dev);
 	if (!info)
 		goto err;
-
 
 
     pp_fix_si.smem_start = (unsigned long) videomemory;
@@ -219,8 +253,8 @@ static int pp_probe(struct platform_device *dev)
 
     pp_var_si.xres = width;
     pp_var_si.yres = height;
-    pp_var_si.xres_virtual = width;
-    pp_var_si.yres_virtual = height;
+    pp_var_si.xres_virtual = v_width;
+    pp_var_si.yres_virtual = v_height;
 
 	info->flags = FBINFO_VIRTFB;
 	info->screen_buffer = videomemory;
@@ -234,7 +268,7 @@ static int pp_probe(struct platform_device *dev)
 	if (retval < 0)
 		goto err1;
 
-    pr_info("pixelpanel: registered /dev/fb%d\n", info->node);
+    pr_info("registered /dev/fb%d\n", info->node);
 
 	platform_set_drvdata(dev, info);
 
@@ -274,7 +308,7 @@ static struct platform_driver pp_driver = {
 	.probe	= pp_probe,
 	.remove = pp_remove,
 	.driver = {
-		.name	= DEVICE_NAME,
+		.name	= KBUILD_MODNAME,
 	},
 };
 
@@ -288,7 +322,7 @@ static int __init pp_init(void)
 	ret = platform_driver_register(&pp_driver);
 
 	if (!ret) {
-		pp_device = platform_device_alloc(DEVICE_NAME, 0);
+		pp_device = platform_device_alloc(KBUILD_MODNAME, 0);
 
 		if (pp_device)
 			ret = platform_device_add(pp_device);
@@ -303,7 +337,6 @@ static int __init pp_init(void)
 
 	return ret;
 }
-
 
 static void __exit pp_exit(void)
 {

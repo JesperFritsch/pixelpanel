@@ -1,5 +1,5 @@
 obj-m += pixelpanel.o
-pixelpanel-objs := pixelpanel_core.o renderers/hub75.o
+pixelpanel-objs := pixelpanel_core.o pixelpanel_hub75.o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 
