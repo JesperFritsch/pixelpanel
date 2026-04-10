@@ -11,6 +11,8 @@
 #include <linux/mm.h>
 #include <linux/of.h>
 
+#include "pixelpanel.h"
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jesper Fritsch");
@@ -270,6 +272,11 @@ static int pp_probe(struct platform_device *dev)
 
     pr_info("registered /dev/fb%d\n", info->node);
 
+    if (!pp_renderer_init(info))
+        goto err2;
+
+    pp_renderer_start();
+
 	platform_set_drvdata(dev, info);
 
 	pp_set_par(info);
@@ -277,6 +284,8 @@ static int pp_probe(struct platform_device *dev)
 	fb_info(info, "pixelpanel device, using %ldK of video memory\n",
 		videomemorysize >> 10);
 	return 0;
+err2: 
+    unregister_framebuffer(info);
 err1:
 	framebuffer_release(info);
 err:
@@ -293,11 +302,17 @@ static int pp_remove(struct platform_device *dev)
 {
     struct fb_info *info = platform_get_drvdata(dev);
 
+    /* Stop and remove the renderer before unregistering and releasing the framebuffer */
+    pp_renderer_stop();
+    pp_renderer_remove();
+
     if (info) {
         unregister_framebuffer(info);
         vfree(videomemory);
         framebuffer_release(info);
     }
+    
+
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(6, 9, 0)
     return 0;
 #endif
