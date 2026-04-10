@@ -272,7 +272,7 @@ static int pp_probe(struct platform_device *dev)
 
     pr_info("registered /dev/fb%d\n", info->node);
 
-    if (!pp_renderer_init(info))
+    if (pp_renderer_init(info))
         goto err2;
 
     pp_renderer_start();
