@@ -87,7 +87,7 @@ static int gpio_map_init(void)
     struct device_node *soc;
     struct resource res;
 
-    soc = of_find_node_by_path("/soc/gpio");
+    soc = of_find_compatible_node(NULL, NULL, "brcm,bcm2835-gpio");
     if (soc) {
         of_address_to_resource(soc, 0, &res);
         gpio_base = ioremap(res.start, resource_size(&res));
