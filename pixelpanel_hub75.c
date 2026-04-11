@@ -12,6 +12,7 @@
 #include "pixelpanel.h"
 #include "header_to_pin.h"
 
+#define PP_REFRESH_CPU 3
 #define MAX_BIT_PLANES 8
 
 #define GPIO_SET0   0x1C    /* GPSET0 — set pins high */
@@ -519,11 +520,20 @@ int pp_renderer_init(struct fb_info *info)
 
 void pp_renderer_start(void)
 {
-    refresh_thread = kthread_run(refresh_fn, NULL, "pp_refresh");
+    refresh_thread = kthread_create(refresh_fn, NULL, "pp_refresh");
     if (IS_ERR(refresh_thread)) {
         pr_err("failed to create refresh thread\n");
         refresh_thread = NULL;
+        return;
     }
+
+    if (num_online_cpus() > PP_REFRESH_CPU) {
+        kthread_bind(refresh_thread, PP_REFRESH_CPU);
+        pr_info("refresh thread pinned to core %d\n", PP_REFRESH_CPU);
+    }
+
+    sched_set_fifo(refresh_thread);
+    wake_up_process(refresh_thread);
 }
 
 
