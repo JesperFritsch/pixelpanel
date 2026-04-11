@@ -297,21 +297,27 @@ static void pwm_init_hw(void)
  */
 static void pwm_send_pulse(int plane)
 {
-    u32 range = base_ticks << plane;
-    u32 total_duty = (range * brightness) / 100;
+    u32 range = (base_ticks * brightness) / 100;
+    u32 total;
 
-    if (range < 16) {
-        writel(range, pwm_base + PWM_RNG1);
-        writel(total_duty, pwm_base + PWM_FIFO);
+    if (range < 1)
+        range = 1;
+
+    total = range << plane;
+
+    if (total <= 16) {
+        writel(total, pwm_base + PWM_RNG1);
+        writel(total, pwm_base + PWM_FIFO);  /* 100% duty — fully on */
     } else {
-        u32 chunk = range / 8;
-        u32 chunk_duty = total_duty / 8;
-        u32 remainder = total_duty - (chunk_duty * 8);
+        u32 chunk = total / 8;
         int i;
+
+        if (chunk < 1)
+            chunk = 1;
 
         writel(chunk, pwm_base + PWM_RNG1);
         for (i = 0; i < 8; i++)
-            writel(chunk_duty + (i < remainder ? 1 : 0), pwm_base + PWM_FIFO);
+            writel(chunk, pwm_base + PWM_FIFO);  /* 100% duty each chunk */
     }
 
     writel(0, pwm_base + PWM_FIFO);
