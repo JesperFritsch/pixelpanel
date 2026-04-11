@@ -9,6 +9,7 @@
 #include <linux/io.h>
 #include <linux/vmalloc.h>
 #include <linux/of_address.h>
+#include <linux/sched/isolation.h>
 
 #include "pixelpanel.h"
 #include "header_to_pin.h"
@@ -547,9 +548,12 @@ void pp_renderer_start(void)
         return;
     }
 
-    if (num_online_cpus() > PP_REFRESH_CPU) {
+    if (num_online_cpus() > PP_REFRESH_CPU &&
+        !housekeeping_test_cpu(PP_REFRESH_CPU, HK_TYPE_DOMAIN)) {
         kthread_bind(refresh_thread, PP_REFRESH_CPU);
-        pr_info("refresh thread pinned to core %d\n", PP_REFRESH_CPU);
+        pr_info("refresh thread pinned to isolated core %d\n", PP_REFRESH_CPU);
+    } else {
+        pr_info("core %d not isolated, refresh thread unpinned\n", PP_REFRESH_CPU);
     }
 
     sched_set_fifo(refresh_thread);
