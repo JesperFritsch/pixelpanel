@@ -61,17 +61,21 @@ static void __iomem *clk_base;
 static struct task_struct *refresh_thread;
 
 static uint gamma_preset = 2;  /* default: 2.2 */
-static u32 brightness = 100;
+static uint brightness = 100;
 static uint refresh_rate = 120;
-
-module_param(refresh_rate, uint, 0644);
-MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 120)");
+static uint base_ticks = 10;
 
 module_param(gamma_preset, uint, 0644);
 MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
 
 module_param(brightness, uint, 0644);
 MODULE_PARM_DESC(brightness, "Brightness 0-100 (default 100)");
+
+module_param(refresh_rate, uint, 0644);
+MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 120)");
+
+module_param(base_ticks, uint, 0644);
+MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 10)");
 
 
 static const struct of_device_id gpio_of_match[] = {
@@ -293,7 +297,6 @@ static void pwm_init_hw(void)
  */
 static void pwm_send_pulse(int plane)
 {
-    u32 base_ticks = 2;
     u32 range = base_ticks << plane;
 
     if (range < 16) {
