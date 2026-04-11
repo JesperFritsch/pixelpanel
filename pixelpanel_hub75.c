@@ -551,12 +551,12 @@ void pp_renderer_start(void)
     if (num_online_cpus() > PP_REFRESH_CPU &&
         !housekeeping_test_cpu(PP_REFRESH_CPU, HK_TYPE_DOMAIN)) {
         kthread_bind(refresh_thread, PP_REFRESH_CPU);
+        sched_set_fifo(refresh_thread);
         pr_info("refresh thread pinned to isolated core %d\n", PP_REFRESH_CPU);
     } else {
         pr_info("core %d not isolated, refresh thread unpinned\n", PP_REFRESH_CPU);
     }
 
-    sched_set_fifo(refresh_thread);
     wake_up_process(refresh_thread);
 }
 
