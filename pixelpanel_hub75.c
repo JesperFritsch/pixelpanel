@@ -3,6 +3,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/of.h>
+#include <linux/module.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -11,6 +12,7 @@
 
 #include "pixelpanel.h"
 #include "header_to_pin.h"
+#include "pixelpanel_hub75.h"
 
 #define PP_REFRESH_CPU 3
 #define MAX_BIT_PLANES 8
@@ -45,8 +47,6 @@ static int gpio_r2, gpio_g2, gpio_b2;
 static int gpio_a_addr, gpio_b_addr, gpio_c_addr, gpio_d_addr, gpio_e_addr;
 static int gpio_clk, gpio_lat, gpio_oe;
 
-static u32 brightness = 100;
-
 static u32 color_lut[64];
 static u32 addr_set_masks[32];
 static u32 *gpio_set_masks;
@@ -58,6 +58,15 @@ static void __iomem *pwm_base;
 static void __iomem *clk_base;
 
 static struct task_struct *refresh_thread;
+
+static uint gamma_preset = 2;  /* default: 2.2 */
+static u32 brightness = 100;
+
+module_param(gamma_preset, uint, 0644);
+MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
+
+module_param(brightness, uint, 0644);
+MODULE_PARM_DESC(brightness, "Brightness: 0-100");
 
 
 static const struct of_device_id gpio_of_match[] = {
@@ -418,13 +427,14 @@ static inline u8 lut_index(u32 top_pxl, u32 bot_pxl,
 static void compute_set_masks(void)
 {
     u32 width = f_info->var.xres;
-    u32 stride = f_info->fix.line_length / 4;  /* pixels per row */
+    u32 stride = f_info->fix.line_length / 4;
     u32 r_off = f_info->var.red.offset;
     u32 g_off = f_info->var.green.offset;
     u32 b_off = f_info->var.blue.offset;
     u32 yoff = f_info->var.yoffset;
     u32 xoff = f_info->var.xoffset;
     u32 *pixels = (u32 *)f_info->screen_buffer;
+    const u8 *gamma = gamma_tables[gamma_preset < NUM_GAMMA_PRESETS ? gamma_preset : 0];
     int plane, row, col;
 
     for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
@@ -435,8 +445,18 @@ static void compute_set_masks(void)
             u32 *row_bot = &pixels[(yoff + row + scan_rows) * stride + xoff];
 
             for (col = 0; col < width; col++) {
-                u8 idx = lut_index(row_top[col], row_bot[col],
-                                   bit, r_off, g_off, b_off);
+                u32 pxl_top = row_top[col];
+                u32 pxl_bot = row_bot[col];
+
+                u32 gt = (gamma[(pxl_top >> r_off) & 0xFF] << r_off) |
+                         (gamma[(pxl_top >> g_off) & 0xFF] << g_off) |
+                         (gamma[(pxl_top >> b_off) & 0xFF] << b_off);
+
+                u32 gb = (gamma[(pxl_bot >> r_off) & 0xFF] << r_off) |
+                         (gamma[(pxl_bot >> g_off) & 0xFF] << g_off) |
+                         (gamma[(pxl_bot >> b_off) & 0xFF] << b_off);
+
+                u8 idx = lut_index(gt, gb, bit, r_off, g_off, b_off);
 
                 gpio_set_masks[(plane * (scan_rows * width)) + (row * width) + col] = color_lut[idx];
             }
