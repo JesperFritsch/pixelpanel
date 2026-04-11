@@ -62,12 +62,16 @@ static struct task_struct *refresh_thread;
 
 static uint gamma_preset = 2;  /* default: 2.2 */
 static u32 brightness = 100;
+static uint refresh_rate = 120;
+
+module_param(refresh_rate, uint, 0644);
+MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 120)");
 
 module_param(gamma_preset, uint, 0644);
 MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
 
 module_param(brightness, uint, 0644);
-MODULE_PARM_DESC(brightness, "Brightness: 0-100");
+MODULE_PARM_DESC(brightness, "Brightness 0-100 (default 100)");
 
 
 static const struct of_device_id gpio_of_match[] = {
@@ -472,40 +476,53 @@ static int refresh_fn(void *data)
     u32 data_mask = BIT(gpio_r1) | BIT(gpio_g1) | BIT(gpio_b1) |
                     BIT(gpio_r2) | BIT(gpio_g2) | BIT(gpio_b2);
     int plane, row, col;
+    ktime_t frame_start, frame_duration, elapsed, remaining;
+    int first_row = 1;
 
     while (!kthread_should_stop()) {
 
+        frame_duration = ns_to_ktime(1000000000ULL / refresh_rate);
+        frame_start = ktime_get();
+
         compute_set_masks();
+
+        first_row = 1;
 
         for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
             for (row = 0; row < scan_rows; row++) {
                 u32 *row_data = &gpio_set_masks[
                     plane * scan_rows * width + row * width];
 
-                /* Clock in pixel data for this row pair */
+                /* Clock in data while previous row is still displayed */
                 for (col = 0; col < width; col++) {
                     gpio_clr_bits(data_mask);
                     gpio_set_bits(row_data[col]);
                     clock_pulse();
                 }
 
-                /* --- Critical section: switch rows and pulse OE --- */
+                /* Wait for previous row's OE pulse to finish */
+                if (!first_row)
+                    pwm_wait_pulse_done();
+                first_row = 0;
 
-                /* OE is already off (FIFO empty → silence → OE high) */
-
-                /* Latch the clocked-in data */
+                /* Latch the new data and switch row */
                 latch_pulse();
-
-                /* Set row address */
                 set_address(row);
 
-                /* Fire precisely-timed OE pulse for this bit plane */
+                /* Start OE pulse for this row */
                 pwm_send_pulse(plane);
-
-                /* Wait for OE pulse to complete before next row */
-                pwm_wait_pulse_done();
             }
         }
+
+        /* Wait for last row's pulse to finish */
+        pwm_wait_pulse_done();
+
+        /* Sleep for remaining frame time */
+        elapsed = ktime_sub(ktime_get(), frame_start);
+        remaining = ktime_sub(frame_duration, elapsed);
+        if (ktime_to_ns(remaining) > 0)
+            usleep_range(ktime_to_us(remaining),
+                         ktime_to_us(remaining) + 100);
     }
     return 0;
 }
