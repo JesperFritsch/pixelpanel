@@ -1,4 +1,5 @@
 
+/* pixelpanel_hub75.c */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/of.h>
@@ -13,29 +14,67 @@
 
 #define MAX_BIT_PLANES 8
 
-#define BCM2835_GPIO_BASE  0x20200000  /* Pi 1 */
-#define BCM2836_GPIO_BASE  0x3F200000  /* Pi 2, 3 */
-#define BCM2711_GPIO_BASE  0xFE200000  /* Pi 4 */
-#define BCM2712_GPIO_BASE  0x1F000D0000 /* Pi 5 */
-
 #define GPIO_SET0   0x1C    /* GPSET0 — set pins high */
 #define GPIO_CLR0   0x28    /* GPCLR0 — set pins low */
 #define GPIO_FSEL0  0x00    /* Function select registers */
+
+#define PWM_CTL   0x00
+#define PWM_STA   0x04
+#define PWM_RNG1  0x10
+
+/* Clock manager PWM registers — offset from clock manager base */
+#define CM_PWMCTL 0xA0
+#define CM_PWMDIV 0xA4
+#define CM_PASSWORD 0x5A000000
+
+#define PWM_FIFO  0x18
+
+#define PWM_CTL_PWEN1  (1 << 0)
+#define PWM_CTL_POLA1  (1 << 4)
+#define PWM_CTL_USEF1  (1 << 5)
+#define PWM_CTL_CLRF1  (1 << 6)
+#define PWM_STA_EMPT1  (1 << 1)
+
+/* GPIO ALT function codes */
+#define GPIO_FSEL_ALT5  2
 
 static struct fb_info *f_info;
 static int gpio_r1, gpio_g1, gpio_b1;
 static int gpio_r2, gpio_g2, gpio_b2;
 static int gpio_a_addr, gpio_b_addr, gpio_c_addr, gpio_d_addr, gpio_e_addr;
 static int gpio_clk, gpio_lat, gpio_oe;
+
+static u32 brightness = 100;
+
 static u32 color_lut[64];
 static u32 addr_set_masks[32];
 static u32 *gpio_set_masks;
 static u32 scan_rows;    /* height / 2 — number of row pairs */
-static u32 screen_width;
-static void __iomem *gpio_base;
-static struct task_struct *refresh_thread;
 static u32 addr_mask;
 
+static void __iomem *gpio_base;
+static void __iomem *pwm_base;
+static void __iomem *clk_base;
+
+static struct task_struct *refresh_thread;
+
+
+static const struct of_device_id gpio_of_match[] = {
+    { .compatible = "brcm,bcm2835-gpio" },   /* Pi 1, 2, 3, Zero */
+    { .compatible = "brcm,bcm2711-gpio" },   /* Pi 4 */
+    {},
+};
+
+static const struct of_device_id pwm_of_match[] = {
+    { .compatible = "brcm,bcm2835-pwm" },
+    {},
+};
+
+static const struct of_device_id clk_of_match[] = {
+    { .compatible = "brcm,bcm2835-cprman" },   /* Pi 1, 2, 3, Zero */
+    { .compatible = "brcm,bcm2711-cprman" },   /* Pi 4 */
+    {},
+};
 
 enum color_idx_bits {
     IDX_R1 = 0,
@@ -82,40 +121,77 @@ static void build_addr_lut(void)
 }
 
 
-static int gpio_map_init(void)
+static int map_peripherals(void)
 {
-    struct device_node *soc;
+    struct device_node *node;
     struct resource res;
 
-    soc = of_find_compatible_node(NULL, NULL, "brcm,bcm2835-gpio");
-    if (!soc) {
-        pr_err("could not find GPIO node in device tree\n");
+    /* GPIO */
+    node = of_find_matching_node(NULL, gpio_of_match);
+    if (!node) {
+        pr_err("GPIO node not found in device tree\n");
         return -ENXIO;
     }
-
-    if (of_address_to_resource(soc, 0, &res)) {
-        pr_err("could not get GPIO resource\n");
-        of_node_put(soc);
+    if (of_address_to_resource(node, 0, &res)) {
+        of_node_put(node);
         return -ENXIO;
     }
-
-    pr_info("GPIO resource: %pR\n", &res);
-
     gpio_base = ioremap(res.start, resource_size(&res));
-    of_node_put(soc);
-
-    if (!gpio_base) {
-        pr_err("failed to ioremap GPIO registers\n");
+    of_node_put(node);
+    if (!gpio_base)
         return -ENXIO;
-    }
+    pr_info("GPIO mapped: %pR\n", &res);
 
-    pr_info("GPIO mapped at %p\n", gpio_base);
+    /* PWM */
+    node = of_find_matching_node(NULL, pwm_of_match);
+    if (!node) {
+        pr_err("PWM node not found in device tree\n");
+        goto err_gpio;
+    }
+    if (of_address_to_resource(node, 0, &res)) {
+        of_node_put(node);
+        goto err_gpio;
+    }
+    pwm_base = ioremap(res.start, resource_size(&res));
+    of_node_put(node);
+    if (!pwm_base)
+        goto err_gpio;
+    pr_info("PWM mapped: %pR\n", &res);
+
+    /* Clock manager */
+    node = of_find_matching_node(NULL, clk_of_match);
+    if (!node) {
+        pr_err("Clock manager node not found in device tree\n");
+        goto err_pwm;
+    }
+    if (of_address_to_resource(node, 0, &res)) {
+        of_node_put(node);
+        goto err_pwm;
+    }
+    clk_base = ioremap(res.start, resource_size(&res));
+    of_node_put(node);
+    if (!clk_base)
+        goto err_pwm;
+    pr_info("Clock manager mapped: %pR\n", &res);
+
     return 0;
+
+err_pwm:
+    iounmap(pwm_base);
+    pwm_base = NULL;
+err_gpio:
+    iounmap(gpio_base);
+    gpio_base = NULL;
+    return -ENXIO;
 }
 
 
-static void gpio_map_remove(void)
+static void unmap_peripherals(void)
 {
+    if (clk_base)
+        iounmap(clk_base);
+    if (pwm_base)
+        iounmap(pwm_base);
     if (gpio_base)
         iounmap(gpio_base);
 }
@@ -133,14 +209,121 @@ static inline void gpio_clr_bits(u32 mask)
 }
 
 
-static void gpio_set_output(int pin)
+static void gpio_set_alt(int pin, int alt)
 {
     int reg = pin / 10;
     int shift = (pin % 10) * 3;
     u32 val = readl(gpio_base + GPIO_FSEL0 + reg * 4);
-    val &= ~(0x7 << shift);   /* clear the 3 bits */
-    val |= (0x1 << shift);    /* 001 = output */
+    val &= ~(0x7 << shift);
+    val |= (alt << shift);
     writel(val, gpio_base + GPIO_FSEL0 + reg * 4);
+}
+
+
+static void pwm_init_hw(void)
+{
+    /* Stop PWM */
+    writel(PWM_CTL_CLRF1, pwm_base + PWM_CTL);
+    udelay(10);
+
+    /* Kill the clock */
+    writel(CM_PASSWORD | (1 << 5), clk_base + CM_PWMCTL);  /* KILL bit */
+    udelay(10);
+    while (readl(clk_base + CM_PWMCTL) & 0x80)  /* wait for BUSY to clear */
+        udelay(1);
+
+    /*
+     * Source = PLLD (500 MHz on all Pi models).
+     * CLK_SRC_PLLD = 6.
+     * Divider: pick something that gives useful resolution.
+     * hzeller computes this from the base nanosecond timing,
+     * but a divider of 2 gives 250 MHz = 4 ns per tick,
+     * which is plenty fine for OE pulses in the microsecond range.
+     */
+    writel(CM_PASSWORD | (2 << 12), clk_base + CM_PWMDIV);
+    writel(CM_PASSWORD | (1 << 4) | 6, clk_base + CM_PWMCTL);  /* ENAB | SRC=PLLD */
+    udelay(10);
+    while (!(readl(clk_base + CM_PWMCTL) & 0x80))  /* wait for BUSY */
+        udelay(1);
+
+    /* Set GPIO 18 to ALT5 (PWM0) */
+    gpio_set_alt(gpio_oe, GPIO_FSEL_ALT5);
+
+    /*
+     * Configure PWM:
+     * - USEF1: use FIFO instead of DAT register
+     * - POLA1: invert polarity (so silence = OE high = display off)
+     * - CLRF1: clear the FIFO
+     * SBIT1 stays 0, so when FIFO is empty the output is low,
+     * but POLA1 inverts it to high → OE inactive.
+     */
+    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
+           pwm_base + PWM_CTL);
+}
+
+
+/*
+ * Fire a one-shot OE pulse.
+ *
+ * We write words into the FIFO — each word is consumed over one PWM period
+ * (RNG1 ticks). A non-zero word means OE active for that many ticks within
+ * the period. After the real data, two zero "sentinel" words ensure the
+ * FIFO drains cleanly and OE returns to inactive.
+ *
+ * For short pulses (low bit planes), one FIFO word is enough.
+ * For longer pulses, we split across multiple FIFO words to keep
+ * RNG1 small — this matters because after the pulse, the PWM must
+ * run through one full "zero" period (RNG1 ticks of silence),
+ * and we don't want that dead time to be huge.
+ */
+static void pwm_send_pulse(int plane)
+{
+    u32 base_ticks = 2;
+    u32 range = base_ticks << plane;
+
+    if (range < 16) {
+        u32 duty = (range * brightness) / 100;
+        writel(range, pwm_base + PWM_RNG1);
+        writel(duty, pwm_base + PWM_FIFO);
+    } else {
+        u32 chunk = range / 8;
+        u32 duty = (chunk * brightness) / 100;
+        writel(chunk, pwm_base + PWM_RNG1);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+        writel(duty, pwm_base + PWM_FIFO);
+    }
+
+    writel(0, pwm_base + PWM_FIFO);
+    writel(0, pwm_base + PWM_FIFO);
+
+    writel(PWM_CTL_USEF1 | PWM_CTL_PWEN1 | PWM_CTL_POLA1,
+           pwm_base + PWM_CTL);
+}
+
+
+static void pwm_wait_pulse_done(void)
+{
+    /* Spin until the FIFO is empty — pulse is finished */
+    while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1))
+        ;
+
+    /* Disable PWM and clear FIFO for next pulse */
+    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
+           pwm_base + PWM_CTL);
+}
+
+
+static void pwm_cleanup(void)
+{
+    writel(0, pwm_base + PWM_CTL);
+    gpio_set_alt(gpio_oe, 0x01);
+    gpio_set_bits(BIT(gpio_oe));
 }
 
 
@@ -167,20 +350,20 @@ static inline void clock_pulse(void)
 
 static void configure_gpio_outputs(void)
 {
-    gpio_set_output(gpio_r1);
-    gpio_set_output(gpio_g1);
-    gpio_set_output(gpio_b1);
-    gpio_set_output(gpio_r2);
-    gpio_set_output(gpio_g2);
-    gpio_set_output(gpio_b2);
-    gpio_set_output(gpio_a_addr);
-    gpio_set_output(gpio_b_addr);
-    gpio_set_output(gpio_c_addr);
-    gpio_set_output(gpio_d_addr);
-    gpio_set_output(gpio_e_addr);
-    gpio_set_output(gpio_clk);
-    gpio_set_output(gpio_lat);
-    gpio_set_output(gpio_oe);
+    gpio_set_alt(gpio_r1, 0x01);
+    gpio_set_alt(gpio_g1, 0x01);
+    gpio_set_alt(gpio_b1, 0x01);
+    gpio_set_alt(gpio_r2, 0x01);
+    gpio_set_alt(gpio_g2, 0x01);
+    gpio_set_alt(gpio_b2, 0x01);
+    gpio_set_alt(gpio_a_addr, 0x01);
+    gpio_set_alt(gpio_b_addr, 0x01);
+    gpio_set_alt(gpio_c_addr, 0x01);
+    gpio_set_alt(gpio_d_addr, 0x01);
+    gpio_set_alt(gpio_e_addr, 0x01);
+    gpio_set_alt(gpio_clk, 0x01);
+    gpio_set_alt(gpio_lat, 0x01);
+    gpio_set_alt(gpio_oe, 0x01);
 
     /* Start with display off */
     gpio_set_bits(BIT(gpio_oe));
@@ -273,34 +456,35 @@ static int refresh_fn(void *data)
         compute_set_masks();
 
         for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
-
             for (row = 0; row < scan_rows; row++) {
-                u32 *row_data = &gpio_set_masks[plane * scan_rows * width + row * width];
+                u32 *row_data = &gpio_set_masks[
+                    plane * scan_rows * width + row * width];
 
-                /* Clock in data for this row pair while previous row is displayed */
+                /* Clock in pixel data for this row pair */
                 for (col = 0; col < width; col++) {
                     gpio_clr_bits(data_mask);
                     gpio_set_bits(row_data[col]);
                     clock_pulse();
                 }
 
-                /* Disable output while switching rows */
-                gpio_set_bits(BIT(gpio_oe));    /* OE high = off */
+                /* --- Critical section: switch rows and pulse OE --- */
+
+                /* OE is already off (FIFO empty → silence → OE high) */
 
                 /* Latch the clocked-in data */
                 latch_pulse();
 
-                /* Set the new row address */
+                /* Set row address */
                 set_address(row);
 
-                /* Enable output — hold for weighted duration */
-                gpio_clr_bits(BIT(gpio_oe));    /* OE low = on */
-                ndelay(200 << plane);  /* T, 2T, 4T, 8T... 128T */
+                /* Fire precisely-timed OE pulse for this bit plane */
+                pwm_send_pulse(plane);
 
+                /* Wait for OE pulse to complete before next row */
+                pwm_wait_pulse_done();
             }
         }
     }
-
     return 0;
 }
 
@@ -312,19 +496,20 @@ int pp_renderer_init(struct fb_info *info)
     f_info = info;
     assign_pins();
 
-    ret = gpio_map_init();
+    ret = map_peripherals();
     if (ret)
         return ret;
 
     configure_gpio_outputs();
+    pwm_init_hw();
     build_color_set_mask_lut();
     build_addr_lut();
 
     scan_rows = f_info->var.yres / 2;
-    screen_width = f_info->var.xres;
-    gpio_set_masks = vmalloc(MAX_BIT_PLANES * scan_rows * screen_width * sizeof(u32));
+    gpio_set_masks = vmalloc(MAX_BIT_PLANES * scan_rows * f_info->var.xres * sizeof(u32));
     if (!gpio_set_masks) {
-        gpio_map_remove();
+        pwm_cleanup();
+        unmap_peripherals();
         return -ENOMEM;
     }
 
@@ -348,6 +533,8 @@ void pp_renderer_stop(void)
         kthread_stop(refresh_thread);
         refresh_thread = NULL;
     }
+    if (pwm_base)
+        pwm_cleanup();
     if (gpio_base)
         gpio_set_bits(BIT(gpio_oe));
 }
@@ -355,9 +542,7 @@ void pp_renderer_stop(void)
 
 void pp_renderer_remove(void)
 {
-    if (gpio_base)
-        gpio_set_bits(BIT(gpio_oe));
-    gpio_map_remove();
+    unmap_peripherals();
     if (gpio_set_masks)
         vfree(gpio_set_masks);
 

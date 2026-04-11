@@ -1,3 +1,4 @@
+/* pixelpanel_core.c */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/init.h>
