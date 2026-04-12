@@ -377,13 +377,6 @@ static int pwm_wait_pulse_done(int plane)
     u32 max_ticks = expected_ticks * 10;
     ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
 
-    /* Sleep precisely during long pulses */
-    if (expected_ticks > 5000) {
-        ktime_t sleep_ns = ns_to_ktime((u64)expected_ticks * NS_PER_TICK / 2);
-        set_current_state(TASK_UNINTERRUPTIBLE);
-        schedule_hrtimeout(&sleep_ns, HRTIMER_MODE_REL);
-    }
-
     while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1)) {
         if (ktime_after(ktime_get(), deadline)) {
             pr_warn("PWM pulse timeout on plane %d\n", plane);
@@ -632,7 +625,7 @@ int pp_renderer_init(struct fb_info *info)
         else
             base_ticks = 1;
 
-        base_ticks = (base_ticks * 90) / 100;
+        base_ticks = (base_ticks * 70) / 100;
         if (base_ticks < 1)
             base_ticks = 1;
     }
