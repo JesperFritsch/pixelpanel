@@ -57,7 +57,6 @@ static int gpio_clk, gpio_lat, gpio_oe;
 
 static u32 color_lut[64];
 static u32 addr_set_masks[32];
-static u32 *gpio_set_masks;
 static u32 scan_rows;    /* height / 2 — number of row pairs */
 static u32 addr_mask;
 
@@ -65,7 +64,10 @@ static void __iomem *gpio_base;
 static void __iomem *pwm_base;
 static void __iomem *clk_base;
 
+static u32 *front_masks_buf;
+static u32 *back_masks_buf;
 static struct task_struct *refresh_thread;
+static struct task_struct *compute_thread;
 
 static uint gamma_preset = 2;  /* default: 2.2 */
 static uint brightness = 50;
@@ -493,7 +495,7 @@ static inline u8 lut_index(u32 top_pxl, u32 bot_pxl,
 /*
     compute the set masks from the screen_buffer
 */
-static void compute_set_masks(void)
+static void compute_set_masks(u32 *masks_buffer)
 {
     u32 width = f_info->var.xres;
     u32 stride = f_info->fix.line_length / 4;
@@ -527,64 +529,55 @@ static void compute_set_masks(void)
 
                 u8 idx = lut_index(gt, gb, bit, r_off, g_off, b_off);
 
-                gpio_set_masks[(plane * (scan_rows * width)) + (row * width) + col] = color_lut[idx];
+                masks_buffer[(plane * (scan_rows * width)) + (row * width) + col] = color_lut[idx];
             }
         }
     }
 }
 
 
-static int refresh_fn(void *data)
+static int scan_fn(void *data)
 {
     u32 width = f_info->var.xres;
     u32 data_mask = BIT(gpio_r1) | BIT(gpio_g1) | BIT(gpio_b1) |
                     BIT(gpio_r2) | BIT(gpio_g2) | BIT(gpio_b2);
     int plane, row, col;
     ktime_t frame_start, frame_duration, elapsed, remaining;
-    int first_row = 1;
+    int first_row;
 
     while (!kthread_should_stop()) {
 
         frame_duration = ns_to_ktime(1000000000ULL / refresh_rate);
         frame_start = ktime_get();
 
-        compute_set_masks();
-
         first_row = 1;
 
         for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
             for (row = 0; row < scan_rows; row++) {
-                u32 *row_data = &gpio_set_masks[
+                u32 *row_data = &front_masks_buf[
                     plane * scan_rows * width + row * width];
 
-                /* Clock in data while previous row is still displayed */
                 for (col = 0; col < width; col++) {
                     gpio_clr_bits(data_mask);
                     gpio_set_bits(row_data[col]);
                     clock_pulse();
                 }
 
-                /* Wait for previous row's OE pulse to finish */
-                if (pwm_wait_pulse_done(plane))
-                    goto frame_done;
-                    
+                if (!first_row) {
+                    if (pwm_wait_pulse_done(plane))
+                        goto frame_done;
+                }
                 first_row = 0;
 
-                /* Latch the new data and switch row */
                 latch_pulse();
                 set_address(row);
-
-                /* Start OE pulse for this row */
                 pwm_send_pulse(plane);
             }
         }
 
-        /* Wait for last row's pulse to finish */
-        pwm_wait_pulse_done(plane);
+        pwm_wait_pulse_done(MAX_BIT_PLANES - 1);
 
 frame_done:
-
-        /* Sleep for remaining frame time */
         elapsed = ktime_sub(ktime_get(), frame_start);
         remaining = ktime_sub(frame_duration, elapsed);
         if (ktime_to_ns(remaining) > 0)
@@ -595,9 +588,22 @@ frame_done:
 }
 
 
+static int compute_fn(void *data)
+{
+    while (!kthread_should_stop()) {
+        u32 sleep_us = 1000000 / refresh_rate;
+        compute_set_masks(back_masks_buf);
+        swap(front_masks_buf, back_masks_buf);
+        usleep_range(sleep_us, sleep_us + 100);
+    }
+    return 0;
+}
+
+
 int pp_renderer_init(struct fb_info *info)
 {
     int ret;
+    size_t masks_size;
 
     f_info = info;
     assign_pins();
@@ -618,19 +624,6 @@ int pp_renderer_init(struct fb_info *info)
         u32 width = f_info->var.xres;
         u32 plane_sum = (1 << MAX_BIT_PLANES) - 1;
 
-        /*
-         * Each row needs:
-         *   - OE time: base_ticks × plane_sum ticks (sum of all bit planes)
-         *   - Clocking time: ~4 register writes per pixel (clr + set + clock)
-         *     across all bit planes = width × 4 × MAX_BIT_PLANES
-         *
-         * Total per row = base_ticks × plane_sum + clocking_overhead
-         * Total per frame = scan_rows × (above) × NS_PER_TICK
-         * Must fit in frame_ns.
-         *
-         * Solve for base_ticks:
-         *   base_ticks ≤ (frame_ns / (scan_rows × NS_PER_TICK) - clocking) / plane_sum
-         */
         u64 per_row_budget = frame_ns / ((u64)scan_rows * NS_PER_TICK);
         u64 clocking_overhead = (u64)width * 4 * MAX_BIT_PLANES;
 
@@ -639,7 +632,6 @@ int pp_renderer_init(struct fb_info *info)
         else
             base_ticks = 1;
 
-        /* 10% safety margin for latching, addressing, scheduling */
         base_ticks = (base_ticks * 90) / 100;
         if (base_ticks < 1)
             base_ticks = 1;
@@ -647,12 +639,20 @@ int pp_renderer_init(struct fb_info *info)
 
     pr_info("base_ticks=%u, refresh_rate=%u\n", base_ticks, refresh_rate);
 
-    gpio_set_masks = vmalloc(MAX_BIT_PLANES * scan_rows * f_info->var.xres * sizeof(u32));
-    if (!gpio_set_masks) {
+    masks_size = MAX_BIT_PLANES * scan_rows * f_info->var.xres * sizeof(u32);
+    front_masks_buf = vmalloc(masks_size);
+    back_masks_buf = vmalloc(masks_size);
+    if (!front_masks_buf || !back_masks_buf) {
+        vfree(front_masks_buf);
+        vfree(back_masks_buf);
         pwm_cleanup();
         unmap_peripherals();
         return -ENOMEM;
     }
+
+    /* Compute initial frame so display has data immediately */
+    compute_set_masks(front_masks_buf);
+    memcpy(back_masks_buf, front_masks_buf, masks_size);
 
     return 0;
 }
@@ -660,9 +660,9 @@ int pp_renderer_init(struct fb_info *info)
 
 void pp_renderer_start(void)
 {
-    refresh_thread = kthread_create(refresh_fn, NULL, "pp_refresh");
+    refresh_thread = kthread_create(scan_fn, NULL, "pp_scan");
     if (IS_ERR(refresh_thread)) {
-        pr_err("failed to create refresh thread\n");
+        pr_err("failed to create scan thread\n");
         refresh_thread = NULL;
         return;
     }
@@ -671,17 +671,25 @@ void pp_renderer_start(void)
         !housekeeping_test_cpu(PP_REFRESH_CPU, HK_TYPE_DOMAIN)) {
         kthread_bind(refresh_thread, PP_REFRESH_CPU);
         sched_set_fifo(refresh_thread);
-        pr_info("refresh thread pinned to isolated core %d\n", PP_REFRESH_CPU);
-    } else {
-        pr_info("core %d not isolated, refresh thread unpinned\n", PP_REFRESH_CPU);
+        pr_info("scan thread pinned to isolated core %d\n", PP_REFRESH_CPU);
     }
 
     wake_up_process(refresh_thread);
+
+    compute_thread = kthread_run(compute_fn, NULL, "pp_compute");
+    if (IS_ERR(compute_thread)) {
+        pr_err("failed to create compute thread\n");
+        compute_thread = NULL;
+    }
 }
 
 
 void pp_renderer_stop(void)
 {
+    if (compute_thread) {
+        kthread_stop(compute_thread);
+        compute_thread = NULL;
+    }
     if (refresh_thread) {
         kthread_stop(refresh_thread);
         refresh_thread = NULL;
@@ -696,7 +704,6 @@ void pp_renderer_stop(void)
 void pp_renderer_remove(void)
 {
     unmap_peripherals();
-    if (gpio_set_masks)
-        vfree(gpio_set_masks);
-
+    vfree(front_masks_buf);
+    vfree(back_masks_buf);
 }
