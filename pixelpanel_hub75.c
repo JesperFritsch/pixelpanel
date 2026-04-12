@@ -42,6 +42,10 @@
 /* GPIO ALT function codes */
 #define GPIO_FSEL_ALT5  2
 
+#define PWM_CLK_DIVIDER 2
+#define PLLD_FREQ_MHZ   500
+#define NS_PER_TICK      (1000 / (PLLD_FREQ_MHZ / PWM_CLK_DIVIDER))  /* = 4 */
+
 static struct fb_info *f_info;
 static int gpio_r1, gpio_g1, gpio_b1;
 static int gpio_r2, gpio_g2, gpio_b2;
@@ -62,8 +66,8 @@ static struct task_struct *refresh_thread;
 
 static uint gamma_preset = 2;  /* default: 2.2 */
 static uint brightness = 100;
-static uint refresh_rate = 120;
-static uint base_ticks = 10;
+static uint refresh_rate = 60;
+static uint base_ticks = 0;
 
 module_param(gamma_preset, uint, 0644);
 MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
@@ -340,6 +344,26 @@ static void pwm_wait_pulse_done(void)
 }
 
 
+static int pwm_wait_pulse_done(void)
+{
+    int timeout = 10000;
+
+    while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1)) {
+        if (--timeout <= 0) {
+            pr_warn("PWM pulse timeout\n");
+            break;
+        }
+    }
+    
+    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
+        pwm_base + PWM_CTL);
+
+    if (timeout <= 0)
+        return -ETIMEDOUT;
+    return 0;
+}
+
+
 static void pwm_cleanup(void)
 {
     writel(0, pwm_base + PWM_CTL);
@@ -551,6 +575,41 @@ int pp_renderer_init(struct fb_info *info)
     build_addr_lut();
 
     scan_rows = f_info->var.yres / 2;
+
+    if (base_ticks == 0) {
+        u64 frame_ns = 1000000000ULL / refresh_rate;
+        u32 width = f_info->var.xres;
+        u32 plane_sum = (1 << MAX_BIT_PLANES) - 1;
+
+        /*
+         * Each row needs:
+         *   - OE time: base_ticks × plane_sum ticks (sum of all bit planes)
+         *   - Clocking time: ~2 register writes per pixel (clr + set + clock)
+         *     across all bit planes = width × 2 × MAX_BIT_PLANES
+         *
+         * Total per row = base_ticks × plane_sum + clocking_overhead
+         * Total per frame = scan_rows × (above) × NS_PER_TICK
+         * Must fit in frame_ns.
+         *
+         * Solve for base_ticks:
+         *   base_ticks ≤ (frame_ns / (scan_rows × NS_PER_TICK) - clocking) / plane_sum
+         */
+        u64 per_row_budget = frame_ns / ((u64)scan_rows * NS_PER_TICK);
+        u64 clocking_overhead = (u64)width * 2 * MAX_BIT_PLANES;
+
+        if (per_row_budget > clocking_overhead)
+            base_ticks = (u32)((per_row_budget - clocking_overhead) / plane_sum);
+        else
+            base_ticks = 1;
+
+        /* 10% safety margin for latching, addressing, scheduling */
+        base_ticks = (base_ticks * 90) / 100;
+        if (base_ticks < 1)
+            base_ticks = 1;
+    }
+
+    pr_info("base_ticks=%u, refresh_rate=%u\n", base_ticks, refresh_rate);
+
     gpio_set_masks = vmalloc(MAX_BIT_PLANES * scan_rows * f_info->var.xres * sizeof(u32));
     if (!gpio_set_masks) {
         pwm_cleanup();
