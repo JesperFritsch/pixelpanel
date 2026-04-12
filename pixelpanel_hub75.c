@@ -545,8 +545,8 @@ static int scan_fn(void *data)
 
         first_row = 1;
 
-        for (row = 0; row < scan_rows; row++) {
-            for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
+        for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
+            for (row = 0; row < scan_rows; row++) {
                 u32 *row_data = &front_masks_buf[
                     plane * scan_rows * width + row * width];
 
