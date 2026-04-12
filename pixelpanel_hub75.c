@@ -571,11 +571,11 @@ static int scan_fn(void *data)
         pwm_wait_pulse_done(MAX_BIT_PLANES - 1);
 
 frame_done:
-        elapsed = ktime_sub(ktime_get(), frame_start);
-        remaining = ktime_sub(frame_duration, elapsed);
-        if (ktime_to_ns(remaining) > 0)
-            usleep_range(ktime_to_us(remaining),
-                         ktime_to_us(remaining) + 100);
+        // elapsed = ktime_sub(ktime_get(), frame_start);
+        // remaining = ktime_sub(frame_duration, elapsed);
+        // if (ktime_to_ns(remaining) > 0)
+        //     usleep_range(ktime_to_us(remaining),
+        //                  ktime_to_us(remaining) + 100);
     }
     return 0;
 }
