@@ -596,7 +596,7 @@ static int compute_fn(void *data)
 
 static void set_max_rt_prio(struct task_struct *tsk)
 {
-    struct sched_param param = { .sched_priority = MAX_USER_RT_PRIO - 1 };
+    struct sched_param param = { .sched_priority = MAX_RT_PRIO - 1 };
     sched_setscheduler_nocheck(tsk, SCHED_FIFO, &param);
 }
 
