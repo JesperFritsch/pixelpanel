@@ -551,8 +551,8 @@ static int scan_fn(void *data)
                     plane * scan_rows * width + row * width];
 
                 for (col = 0; col < width; col++) {
-                    gpio_clr_bits(data_mask);
-                    gpio_set_bits(row_data[col]);
+                    writel(row_data[col], gpio_base + GPIO_SET0);
+                    writel(data_mask & ~row_data[col], gpio_base + GPIO_CLR0);
                     clock_pulse();
                 }
 
@@ -571,11 +571,11 @@ static int scan_fn(void *data)
         pwm_wait_pulse_done(MAX_BIT_PLANES - 1);
 
 frame_done:
-        // elapsed = ktime_sub(ktime_get(), frame_start);
-        // remaining = ktime_sub(frame_duration, elapsed);
-        // if (ktime_to_ns(remaining) > 0)
-        //     usleep_range(ktime_to_us(remaining),
-        //                  ktime_to_us(remaining) + 100);
+        elapsed = ktime_sub(ktime_get(), frame_start);
+        remaining = ktime_sub(frame_duration, elapsed);
+        if (ktime_to_ns(remaining) > 0)
+            usleep_range(ktime_to_us(remaining),
+                         ktime_to_us(remaining) + 100);
     }
     return 0;
 }
