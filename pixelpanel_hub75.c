@@ -276,20 +276,20 @@ static void unmap_peripherals(void)
 
 static inline void gpio_set_bits(u32 mask)
 {
-    *gpio_set_reg = mask;
+    writel(mask, gpio_base + GPIO_SET0);
 }
 
 
 static inline void gpio_clr_bits(u32 mask)
 {
-    *gpio_clr_reg = mask;
+    writel(mask, gpio_base + GPIO_CLR0);
 }
 
 
 static inline void gpio_write_masked_bits(u32 value, u32 mask)
 {
-    *gpio_clr_reg = ~value & mask;
-    *gpio_set_reg = value & mask;
+    writel(~value & mask, gpio_base + GPIO_CLR0);
+    writel(value & mask, gpio_base + GPIO_SET0);
 }
 
 
