@@ -70,14 +70,48 @@ static uint brightness = 50;
 static uint refresh_rate = 60;
 static uint base_ticks = 0;
 
-module_param(gamma_preset, uint, 0644);
-MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
+static int param_set_brightness(const char *val, const struct kernel_param *kp)
+{
+    uint tmp;
+    int ret = kstrtouint(val, 0, &tmp);
+    if (ret)
+        return ret;
+    if (tmp > 100)
+        return -EINVAL;
+    brightness = tmp;
+    return 0;
+}
 
-module_param(brightness, uint, 0644);
+static int param_set_refresh_rate(const char *val, const struct kernel_param *kp)
+{
+    uint tmp;
+    int ret = kstrtouint(val, 0, &tmp);
+    if (ret)
+        return ret;
+    if (tmp < 1)
+        return -EINVAL;
+    refresh_rate = tmp;
+    return 0;
+}
+
+static const struct kernel_param_ops brightness_ops = {
+    .set = param_set_brightness,
+    .get = param_get_uint,
+};
+
+static const struct kernel_param_ops refresh_rate_ops = {
+    .set = param_set_refresh_rate,
+    .get = param_get_uint,
+};
+
+module_param_cb(brightness, &brightness_ops, &brightness, 0644);
 MODULE_PARM_DESC(brightness, "Brightness 0-100 (default 50)");
 
-module_param(refresh_rate, uint, 0644);
+module_param_cb(refresh_rate, &refresh_rate_ops, &refresh_rate, 0644);
 MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 60)");
+
+module_param(gamma_preset, uint, 0644);
+MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
 
 module_param(base_ticks, uint, 0644);
 MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 0=auto)");
@@ -578,8 +612,8 @@ int pp_renderer_init(struct fb_info *info)
         /*
          * Each row needs:
          *   - OE time: base_ticks × plane_sum ticks (sum of all bit planes)
-         *   - Clocking time: ~2 register writes per pixel (clr + set + clock)
-         *     across all bit planes = width × 2 × MAX_BIT_PLANES
+         *   - Clocking time: ~4 register writes per pixel (clr + set + clock)
+         *     across all bit planes = width × 4 × MAX_BIT_PLANES
          *
          * Total per row = base_ticks × plane_sum + clocking_overhead
          * Total per frame = scan_rows × (above) × NS_PER_TICK
@@ -589,7 +623,7 @@ int pp_renderer_init(struct fb_info *info)
          *   base_ticks ≤ (frame_ns / (scan_rows × NS_PER_TICK) - clocking) / plane_sum
          */
         u64 per_row_budget = frame_ns / ((u64)scan_rows * NS_PER_TICK);
-        u64 clocking_overhead = (u64)width * 2 * MAX_BIT_PLANES;
+        u64 clocking_overhead = (u64)width * 4 * MAX_BIT_PLANES;
 
         if (per_row_budget > clocking_overhead)
             base_ticks = (u32)((per_row_budget - clocking_overhead) / plane_sum);
