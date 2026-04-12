@@ -67,7 +67,7 @@ static struct task_struct *refresh_thread;
 
 static uint gamma_preset = 2;  /* default: 2.2 */
 static uint brightness = 50;
-static uint refresh_rate = 60;
+static uint refresh_rate = 120;
 static uint base_ticks = 0;
 
 static int param_set_brightness(const char *val, const struct kernel_param *kp)
@@ -108,7 +108,7 @@ module_param_cb(brightness, &brightness_ops, &brightness, 0644);
 MODULE_PARM_DESC(brightness, "Brightness 0-100 (default 50)");
 
 module_param_cb(refresh_rate, &refresh_rate_ops, &refresh_rate, 0644);
-MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 60)");
+MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 120)");
 
 module_param(gamma_preset, uint, 0644);
 MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
