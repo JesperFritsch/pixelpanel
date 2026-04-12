@@ -13,6 +13,7 @@
 #include <linux/ktime.h>
 #include <linux/hrtimer.h>
 #include <linux/sched.h>
+#include <linux/sched/rt.h>
 
 #include "pixelpanel.h"
 #include "header_to_pin.h"
@@ -593,6 +594,13 @@ static int compute_fn(void *data)
 }
 
 
+static void set_max_rt_prio(struct task_struct *tsk)
+{
+    struct sched_param param = { .sched_priority = MAX_USER_RT_PRIO - 1 };
+    sched_setscheduler_nocheck(tsk, SCHED_FIFO, &param);
+}
+
+
 int pp_renderer_init(struct fb_info *info)
 {
     int ret;
@@ -663,7 +671,7 @@ void pp_renderer_start(void)
     if (num_online_cpus() > PP_REFRESH_CPU &&
         !housekeeping_test_cpu(PP_REFRESH_CPU, HK_TYPE_DOMAIN)) {
         kthread_bind(refresh_thread, PP_REFRESH_CPU);
-        sched_set_fifo(refresh_thread);
+        set_max_rt_prio(refresh_thread);
         pr_info("scan thread pinned to isolated core %d\n", PP_REFRESH_CPU);
     }
 
