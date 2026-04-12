@@ -11,6 +11,8 @@
 #include <linux/of_address.h>
 #include <linux/sched/isolation.h>
 #include <linux/ktime.h>
+#include <linux/hrtimer.h>
+#include <linux/sched.h>
 
 #include "pixelpanel.h"
 #include "header_to_pin.h"
@@ -373,10 +375,11 @@ static int pwm_wait_pulse_done(int plane)
     u32 max_ticks = expected_ticks * 10;
     ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
 
-    /* Sleep during long pulses to reduce CPU usage */
+    /* Sleep precisely during long pulses */
     if (expected_ticks > 5000) {
-        u32 sleep_us = (expected_ticks * NS_PER_TICK) / 1000;
-        usleep_range(sleep_us / 2, sleep_us / 2 + 10);
+        ktime_t sleep_ns = ns_to_ktime((u64)expected_ticks * NS_PER_TICK / 2);
+        set_current_state(TASK_UNINTERRUPTIBLE);
+        schedule_hrtimeout(&sleep_ns, HRTIMER_MODE_REL);
     }
 
     while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1)) {
@@ -562,10 +565,9 @@ static int refresh_fn(void *data)
                 }
 
                 /* Wait for previous row's OE pulse to finish */
-                if (!first_row){
-                    if (pwm_wait_pulse_done(plane))
-                        goto frame_done;
-                }
+                if (pwm_wait_pulse_done(plane))
+                    goto frame_done;
+                    
                 first_row = 0;
 
                 /* Latch the new data and switch row */
