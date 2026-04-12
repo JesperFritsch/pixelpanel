@@ -563,7 +563,7 @@ static int refresh_fn(void *data)
 
                 /* Wait for previous row's OE pulse to finish */
                 if (!first_row){
-                    if (pwm_wait_pulse_done())
+                    if (pwm_wait_pulse_done(plane))
                         goto frame_done;
                 }
                 first_row = 0;
@@ -578,7 +578,7 @@ static int refresh_fn(void *data)
         }
 
         /* Wait for last row's pulse to finish */
-        pwm_wait_pulse_done();
+        pwm_wait_pulse_done(plane);
 
 frame_done:
 
