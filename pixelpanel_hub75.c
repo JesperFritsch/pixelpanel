@@ -556,7 +556,6 @@ static int scan_fn(void *data)
     u32 color_clk_mask = data_mask | BIT(gpio_clk);
     int plane, row, col;
     u32 start_time_us, elapsed_us, target_frame_us;
-    int first_iter;
     u32 *scan_buf;
 
     while (!kthread_should_stop()) {
@@ -565,34 +564,38 @@ static int scan_fn(void *data)
         start_time_us = ktime_to_us(ktime_get());
 
         scan_buf = front_masks_buf;
-        first_iter = 1;
 
-        for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
-            for (row = 0; row < scan_rows; row++) {
+        for (row = 0; row < scan_rows; row++) {
+            for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
                 u32 *row_data = &scan_buf[
                     plane * scan_rows * width + row * width];
 
+                /* Clock in data while previous OE pulse is still running */
                 for (col = 0; col < width; col++) {
                     gpio_write_masked_bits(row_data[col], color_clk_mask);
                     gpio_set_bits(BIT(gpio_clk));
                 }
 
-                if (!first_iter) {
-                    if (pwm_wait_pulse_done())
-                        goto frame_done;
-                }
-                first_iter = 0;
+                /* Clear color and clock lines after clocking */
+                gpio_clr_bits(color_clk_mask);
 
-                latch_pulse();
+                /* Wait for previous OE pulse to finish */
+                if (pwm_wait_pulse_done())
+                    goto frame_done;
+
+                /* Set row address THEN latch — must happen in dark time */
                 set_address(row);
+                latch_pulse();
+
+                /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
             }
         }
 
+        /* Wait for last pulse */
         pwm_wait_pulse_done();
 
 frame_done:
-        /* Sleep most of remainder, busy-wait the tail for precision */
         elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
         if (elapsed_us < target_frame_us) {
             u32 remaining_us = target_frame_us - elapsed_us;
