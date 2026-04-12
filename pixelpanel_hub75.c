@@ -367,14 +367,21 @@ static void pwm_send_pulse(int plane)
 }
 
 
-static int pwm_wait_pulse_done(void)
+static int pwm_wait_pulse_done(int plane)
 {
-    u32 max_ticks = (base_ticks << MAX_BIT_PLANES) * 10;
+    u32 expected_ticks = base_ticks << plane;
+    u32 max_ticks = expected_ticks * 10;
     ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
+
+    /* Sleep during long pulses to reduce CPU usage */
+    if (expected_ticks > 5000) {
+        u32 sleep_us = (expected_ticks * NS_PER_TICK) / 1000;
+        usleep_range(sleep_us / 2, sleep_us / 2 + 10);
+    }
 
     while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1)) {
         if (ktime_after(ktime_get(), deadline)) {
-            pr_warn("PWM pulse timeout\n");
+            pr_warn("PWM pulse timeout on plane %d\n", plane);
             break;
         }
     }
