@@ -55,6 +55,13 @@ static int gpio_r1, gpio_g1, gpio_b1;
 static int gpio_r2, gpio_g2, gpio_b2;
 static int gpio_a_addr, gpio_b_addr, gpio_c_addr, gpio_d_addr, gpio_e_addr;
 static int gpio_clk, gpio_lat, gpio_oe;
+static volatile u32 *gpio_set_reg;
+static volatile u32 *gpio_clr_reg;
+static volatile u32 *pwm_ctl_reg;
+static volatile u32 *pwm_sta_reg;
+static volatile u32 *pwm_rng1_reg;
+static volatile u32 *pwm_fifo_reg;
+
 
 static u32 color_lut[64];
 static u32 addr_set_masks[32];
@@ -237,6 +244,13 @@ static int map_peripherals(void)
         goto err_pwm;
     pr_info("Clock manager mapped: %pR\n", &res);
 
+    gpio_set_reg = (volatile u32 *)(gpio_base + GPIO_SET0);
+    gpio_clr_reg = (volatile u32 *)(gpio_base + GPIO_CLR0);
+    pwm_ctl_reg = (volatile u32 *)(pwm_base + PWM_CTL);
+    pwm_sta_reg = (volatile u32 *)(pwm_base + PWM_STA);
+    pwm_rng1_reg = (volatile u32 *)(pwm_base + PWM_RNG1);
+    pwm_fifo_reg = (volatile u32 *)(pwm_base + PWM_FIFO);
+
     return 0;
 
 err_pwm:
@@ -262,13 +276,20 @@ static void unmap_peripherals(void)
 
 static inline void gpio_set_bits(u32 mask)
 {
-    writel(mask, gpio_base + GPIO_SET0);
+    *gpio_set_reg = mask;
 }
 
 
 static inline void gpio_clr_bits(u32 mask)
 {
-    writel(mask, gpio_base + GPIO_CLR0);
+    *gpio_clr_reg = mask;
+}
+
+
+static inline void gpio_write_masked_bits(u32 value, u32 mask)
+{
+    *gpio_clr_reg = ~value & mask;
+    *gpio_set_reg = value & mask;
 }
 
 
@@ -350,8 +371,8 @@ static void pwm_send_pulse(int plane)
     total = range << plane;
 
     if (total <= 16) {
-        writel(total, pwm_base + PWM_RNG1);
-        writel(total, pwm_base + PWM_FIFO);  /* 100% duty — fully on */
+        *pwm_rng1_reg = total; 
+        *pwm_fifo_reg = total;
     } else {
         u32 chunk = total / 8;
         int i;
@@ -359,34 +380,31 @@ static void pwm_send_pulse(int plane)
         if (chunk < 1)
             chunk = 1;
 
-        writel(chunk, pwm_base + PWM_RNG1);
+        *pwm_rng1_reg = chunk;
         for (i = 0; i < 8; i++)
-            writel(chunk, pwm_base + PWM_FIFO);  /* 100% duty each chunk */
+            *pwm_fifo_reg = chunk;
     }
 
-    writel(0, pwm_base + PWM_FIFO);
-    writel(0, pwm_base + PWM_FIFO);
+    *pwm_fifo_reg = 0;
+    *pwm_fifo_reg = 0;
 
-    writel(PWM_CTL_USEF1 | PWM_CTL_PWEN1 | PWM_CTL_POLA1,
-           pwm_base + PWM_CTL);
+    *pwm_ctl_reg = PWM_CTL_USEF1 | PWM_CTL_PWEN1 | PWM_CTL_POLA1;
 }
 
 
-static int pwm_wait_pulse_done(int plane)
+static int pwm_wait_pulse_done(void)
 {
-    u32 expected_ticks = base_ticks << plane;
-    u32 max_ticks = expected_ticks * 10;
+    u32 max_ticks = (base_ticks << MAX_BIT_PLANES) * 10;
     ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
 
-    while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1)) {
+    while (!(*pwm_sta_reg & PWM_STA_EMPT1)) {
         if (ktime_after(ktime_get(), deadline)) {
-            pr_warn("PWM pulse timeout on plane %d\n", plane);
+            pr_warn("PWM pulse timeout\n");
             break;
         }
     }
 
-    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
-           pwm_base + PWM_CTL);
+    *pwm_ctl_reg = PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1;
 
     if (ktime_after(ktime_get(), deadline))
         return -ETIMEDOUT;
@@ -535,33 +553,35 @@ static int scan_fn(void *data)
     u32 width = f_info->var.xres;
     u32 data_mask = BIT(gpio_r1) | BIT(gpio_g1) | BIT(gpio_b1) |
                     BIT(gpio_r2) | BIT(gpio_g2) | BIT(gpio_b2);
+    u32 color_clk_mask = data_mask | BIT(gpio_clk);
     int plane, row, col;
-    ktime_t frame_start, frame_duration, elapsed, remaining;
-    int first_row;
+    u32 start_time_us, elapsed_us, target_frame_us;
+    int first_iter;
+    u32 *scan_buf;
 
     while (!kthread_should_stop()) {
 
-        frame_duration = ns_to_ktime(1000000000ULL / refresh_rate);
-        frame_start = ktime_get();
+        target_frame_us = 1000000 / refresh_rate;
+        start_time_us = ktime_to_us(ktime_get());
 
-        first_row = 1;
+        scan_buf = front_masks_buf;
+        first_iter = 1;
 
         for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
             for (row = 0; row < scan_rows; row++) {
-                u32 *row_data = &front_masks_buf[
+                u32 *row_data = &scan_buf[
                     plane * scan_rows * width + row * width];
 
                 for (col = 0; col < width; col++) {
-                    writel(row_data[col], gpio_base + GPIO_SET0);
-                    writel(data_mask & ~row_data[col], gpio_base + GPIO_CLR0);
-                    clock_pulse();
+                    gpio_write_masked_bits(row_data[col], color_clk_mask);
+                    gpio_set_bits(BIT(gpio_clk));
                 }
 
-                if (!first_row) {
-                    if (pwm_wait_pulse_done(plane))
+                if (!first_iter) {
+                    if (pwm_wait_pulse_done())
                         goto frame_done;
                 }
-                first_row = 0;
+                first_iter = 0;
 
                 latch_pulse();
                 set_address(row);
@@ -569,14 +589,20 @@ static int scan_fn(void *data)
             }
         }
 
-        pwm_wait_pulse_done(MAX_BIT_PLANES - 1);
+        pwm_wait_pulse_done();
 
 frame_done:
-        elapsed = ktime_sub(ktime_get(), frame_start);
-        remaining = ktime_sub(frame_duration, elapsed);
-        if (ktime_to_ns(remaining) > 0)
-            usleep_range(ktime_to_us(remaining),
-                         ktime_to_us(remaining) + 100);
+        /* Sleep most of remainder, busy-wait the tail for precision */
+        elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
+        if (elapsed_us < target_frame_us) {
+            u32 remaining_us = target_frame_us - elapsed_us;
+            if (remaining_us > 200)
+                usleep_range(remaining_us - 200, remaining_us - 100);
+
+            do {
+                elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
+            } while (elapsed_us < target_frame_us);
+        }
     }
     return 0;
 }
@@ -591,13 +617,6 @@ static int compute_fn(void *data)
         usleep_range(sleep_us, sleep_us + 100);
     }
     return 0;
-}
-
-
-static void set_max_rt_prio(struct task_struct *tsk)
-{
-    struct sched_param param = { .sched_priority = MAX_RT_PRIO - 1 };
-    sched_setscheduler_nocheck(tsk, SCHED_FIFO, &param);
 }
 
 
@@ -671,7 +690,7 @@ void pp_renderer_start(void)
     if (num_online_cpus() > PP_REFRESH_CPU &&
         !housekeeping_test_cpu(PP_REFRESH_CPU, HK_TYPE_DOMAIN)) {
         kthread_bind(refresh_thread, PP_REFRESH_CPU);
-        set_max_rt_prio(refresh_thread);
+        sched_set_fifo(refresh_thread);
         pr_info("scan thread pinned to isolated core %d\n", PP_REFRESH_CPU);
     }
 
