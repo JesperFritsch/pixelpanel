@@ -10,6 +10,7 @@
 #include <linux/vmalloc.h>
 #include <linux/of_address.h>
 #include <linux/sched/isolation.h>
+#include <linux/ktime.h>
 
 #include "pixelpanel.h"
 #include "header_to_pin.h"
@@ -65,7 +66,7 @@ static void __iomem *clk_base;
 static struct task_struct *refresh_thread;
 
 static uint gamma_preset = 2;  /* default: 2.2 */
-static uint brightness = 100;
+static uint brightness = 50;
 static uint refresh_rate = 60;
 static uint base_ticks = 0;
 
@@ -73,13 +74,13 @@ module_param(gamma_preset, uint, 0644);
 MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
 
 module_param(brightness, uint, 0644);
-MODULE_PARM_DESC(brightness, "Brightness 0-100 (default 100)");
+MODULE_PARM_DESC(brightness, "Brightness 0-100 (default 50)");
 
 module_param(refresh_rate, uint, 0644);
-MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 120)");
+MODULE_PARM_DESC(refresh_rate, "Target refresh rate in Hz (default 60)");
 
 module_param(base_ticks, uint, 0644);
-MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 10)");
+MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 0=auto)");
 
 
 static const struct of_device_id gpio_of_match[] = {
@@ -263,7 +264,7 @@ static void pwm_init_hw(void)
      * but a divider of 2 gives 250 MHz = 4 ns per tick,
      * which is plenty fine for OE pulses in the microsecond range.
      */
-    writel(CM_PASSWORD | (2 << 12), clk_base + CM_PWMDIV);
+    writel(CM_PASSWORD | (PWM_CLK_DIVIDER << 12), clk_base + CM_PWMDIV);
     writel(CM_PASSWORD | (1 << 4) | 6, clk_base + CM_PWMCTL);  /* ENAB | SRC=PLLD */
     udelay(10);
     while (!(readl(clk_base + CM_PWMCTL) & 0x80))  /* wait for BUSY */
@@ -332,33 +333,22 @@ static void pwm_send_pulse(int plane)
 }
 
 
-static void pwm_wait_pulse_done(void)
-{
-    /* Spin until the FIFO is empty — pulse is finished */
-    while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1))
-        ;
-
-    /* Disable PWM and clear FIFO for next pulse */
-    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
-           pwm_base + PWM_CTL);
-}
-
-
 static int pwm_wait_pulse_done(void)
 {
-    int timeout = 10000;
+    u32 max_ticks = (base_ticks << MAX_BIT_PLANES) * 10;
+    ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
 
     while (!(readl(pwm_base + PWM_STA) & PWM_STA_EMPT1)) {
-        if (--timeout <= 0) {
+        if (ktime_after(ktime_get(), deadline)) {
             pr_warn("PWM pulse timeout\n");
             break;
         }
     }
-    
-    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
-        pwm_base + PWM_CTL);
 
-    if (timeout <= 0)
+    writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
+           pwm_base + PWM_CTL);
+
+    if (ktime_after(ktime_get(), deadline))
         return -ETIMEDOUT;
     return 0;
 }
@@ -531,8 +521,10 @@ static int refresh_fn(void *data)
                 }
 
                 /* Wait for previous row's OE pulse to finish */
-                if (!first_row)
-                    pwm_wait_pulse_done();
+                if (!first_row){
+                    if (pwm_wait_pulse_done())
+                        goto frame_done;
+                }
                 first_row = 0;
 
                 /* Latch the new data and switch row */
@@ -546,6 +538,8 @@ static int refresh_fn(void *data)
 
         /* Wait for last row's pulse to finish */
         pwm_wait_pulse_done();
+
+frame_done:
 
         /* Sleep for remaining frame time */
         elapsed = ktime_sub(ktime_get(), frame_start);
