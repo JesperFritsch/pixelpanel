@@ -422,6 +422,13 @@ static inline void clock_pulse(void)
 }
 
 
+static inline void gpio_write_masked_bits(u32 value, u32 mask)
+{
+    writel(~value & mask, gpio_base + GPIO_CLR0);
+    writel(value & mask, gpio_base + GPIO_SET0);
+}
+
+
 static void configure_gpio_outputs(void)
 {
     gpio_set_alt(gpio_r1, 0x01);
@@ -534,36 +541,54 @@ static int scan_fn(void *data)
     u32 width = f_info->var.xres;
     u32 data_mask = BIT(gpio_r1) | BIT(gpio_g1) | BIT(gpio_b1) |
                     BIT(gpio_r2) | BIT(gpio_g2) | BIT(gpio_b2);
+    u32 color_clk_mask = data_mask | BIT(gpio_clk);
     int plane, row, col;
-    ktime_t frame_start, frame_duration, elapsed, remaining;
+    u32 start_time_us, elapsed_us, target_frame_us;
     int first_row;
+    u32 *scan_buf;
 
     while (!kthread_should_stop()) {
 
-        frame_duration = ns_to_ktime(1000000000ULL / refresh_rate);
-        frame_start = ktime_get();
+        target_frame_us = 1000000 / refresh_rate;
+        start_time_us = ktime_to_us(ktime_get());
 
+        scan_buf = front_masks_buf;
         first_row = 1;
 
-        for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
-            for (row = 0; row < scan_rows; row++) {
-                u32 *row_data = &front_masks_buf[
+        /*
+         * Scan order: row-first, then bit planes within each row.
+         * All bit planes for one row are scanned before switching
+         * to the next row. This reduces ghosting because the row
+         * address changes less frequently.
+         */
+        for (row = 0; row < scan_rows; row++) {
+            for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
+                u32 *row_data = &scan_buf[
                     plane * scan_rows * width + row * width];
 
+                /*
+                 * Clock in pixel data. WriteMaskedBits sets colors
+                 * and resets clock low in one operation, then
+                 * SetBits raises clock edge to latch the data.
+                 * Two GPIO writes per pixel instead of four.
+                 */
                 for (col = 0; col < width; col++) {
-                    writel(row_data[col], gpio_base + GPIO_SET0);
-                    writel(data_mask & ~row_data[col], gpio_base + GPIO_CLR0);
-                    clock_pulse();
+                    gpio_write_masked_bits(row_data[col], color_clk_mask);
+                    gpio_set_bits(BIT(gpio_clk));
                 }
 
+                /* Wait for previous OE pulse to finish */
                 if (!first_row) {
                     if (pwm_wait_pulse_done(plane))
                         goto frame_done;
                 }
                 first_row = 0;
 
+                /* Latch and set row address */
                 latch_pulse();
                 set_address(row);
+
+                /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
             }
         }
@@ -571,11 +596,10 @@ static int scan_fn(void *data)
         pwm_wait_pulse_done(MAX_BIT_PLANES - 1);
 
 frame_done:
-        elapsed = ktime_sub(ktime_get(), frame_start);
-        remaining = ktime_sub(frame_duration, elapsed);
-        if (ktime_to_ns(remaining) > 0)
-            usleep_range(ktime_to_us(remaining),
-                         ktime_to_us(remaining) + 100);
+        /* Busy-wait to fixed frame duration for consistent brightness */
+        do {
+            elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
+        } while (elapsed_us < target_frame_us && !kthread_should_stop());
     }
     return 0;
 }
