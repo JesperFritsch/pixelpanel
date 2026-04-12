@@ -128,6 +128,10 @@ MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
 module_param(base_ticks, uint, 0644);
 MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 0=auto)");
 
+static uint gpio_slowdown = 1;
+module_param(gpio_slowdown, uint, 0644);
+MODULE_PARM_DESC(gpio_slowdown, "GPIO slowdown factor, higher = slower but more stable (default 1)");
+
 
 static const struct of_device_id gpio_of_match[] = {
     { .compatible = "brcm,bcm2835-gpio" },   /* Pi 1, 2, 3, Zero */
@@ -274,15 +278,25 @@ static void unmap_peripherals(void)
 }
 
 
+static inline void gpio_delay(void)
+{
+    uint i;
+    for (i = 0; i < gpio_slowdown; i++)
+        writel(0, gpio_base + GPIO_CLR0);
+}
+
+
 static inline void gpio_set_bits(u32 mask)
 {
     writel(mask, gpio_base + GPIO_SET0);
+    gpio_delay();
 }
 
 
 static inline void gpio_clr_bits(u32 mask)
 {
     writel(mask, gpio_base + GPIO_CLR0);
+    gpio_delay();
 }
 
 
@@ -290,6 +304,7 @@ static inline void gpio_write_masked_bits(u32 value, u32 mask)
 {
     writel(~value & mask, gpio_base + GPIO_CLR0);
     writel(value & mask, gpio_base + GPIO_SET0);
+    gpio_delay();
 }
 
 
