@@ -81,6 +81,7 @@ static uint gamma_preset = 2;  /* default: 2.2 */
 static uint brightness = 50;
 static uint refresh_rate = 120;
 static uint base_ticks = 0;
+static uint gpio_slowdown = 0;
 
 static int param_set_brightness(const char *val, const struct kernel_param *kp)
 {
@@ -128,7 +129,6 @@ MODULE_PARM_DESC(gamma_preset, "Gamma preset: 0=off 1=1.8 2=2.2 3=2.5 4=2.8");
 module_param(base_ticks, uint, 0644);
 MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 0=auto)");
 
-static uint gpio_slowdown = 1;
 module_param(gpio_slowdown, uint, 0644);
 MODULE_PARM_DESC(gpio_slowdown, "GPIO slowdown factor, higher = slower but more stable (default 1)");
 
@@ -585,23 +585,24 @@ static int scan_fn(void *data)
                 u32 *row_data = &scan_buf[
                     plane * scan_rows * width + row * width];
                     
-                    /* Clock in data while previous OE pulse is still running */
-                    for (col = 0; col < width; col++) {
-                        gpio_write_masked_bits(row_data[col], color_clk_mask);
-                        gpio_set_bits(BIT(gpio_clk));
-                    }
-                    
-                    /* Clear color and clock lines after clocking */
-                    gpio_clr_bits(color_clk_mask);
-                    
-                    /* Wait for previous OE pulse to finish */
-                    if (pwm_wait_pulse_done())
-                    {
-                        goto frame_done;
-                    }
+                /* Clock in data while previous OE pulse is still running */
+                for (col = 0; col < width; col++) {
+                    gpio_write_masked_bits(row_data[col], color_clk_mask);
+                    gpio_set_bits(BIT(gpio_clk));
+                }
+                
+                /* Clear color and clock lines after clocking */
+                gpio_clr_bits(color_clk_mask);
+                
+                /* Wait for previous OE pulse to finish */
+                if (pwm_wait_pulse_done())
+                {
+                    goto frame_done;
+                }
                     
                 /* Only set the address once per plane */
                 if (plane == 0) set_address(row);
+                gpio_set_bits(BIT((gpio_oe)));
                 latch_pulse();
                 /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
