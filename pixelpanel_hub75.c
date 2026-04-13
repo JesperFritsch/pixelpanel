@@ -596,14 +596,13 @@ static int scan_fn(void *data)
                 /* Wait for previous OE pulse to finish */
                 if (pwm_wait_pulse_done())
                     goto frame_done;
-
-                /* Set row address THEN latch — must happen in dark time */
-                set_address(row);
-                latch_pulse();
-
+        
                 /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
             }
+            /* Set row address THEN latch — must happen in dark time */
+            set_address(row);
+            latch_pulse();
         }
 
         /* Wait for last pulse */
