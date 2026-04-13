@@ -580,6 +580,9 @@ static int scan_fn(void *data)
         scan_buf = front_masks_buf;
 
         for (row = 0; row < scan_rows; row++) {
+            /* Set row address THEN latch — must happen in dark time */
+            set_address(row);
+            latch_pulse();
             for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
                 u32 *row_data = &scan_buf[
                     plane * scan_rows * width + row * width];
@@ -597,24 +600,14 @@ static int scan_fn(void *data)
                 if (pwm_wait_pulse_done())
                     goto frame_done;
 
-                /* Set row address THEN latch — must happen in dark time */
-                set_address(row);
-                latch_pulse();
-
-                /* Start OE pulse for this bit plane */
-                pwm_send_pulse(plane);
+                    
+                    /* Start OE pulse for this bit plane */
+                    pwm_send_pulse(plane);
             }
         }
 
         /* Wait for last pulse */
         pwm_wait_pulse_done();
-
-        /* Clear shift registers to prevent ghosting on first row */
-        for (col = 0; col < width; col++) {
-            gpio_clr_bits(color_clk_mask);
-            gpio_set_bits(BIT(gpio_clk));
-        }
-        gpio_clr_bits(color_clk_mask);
 
 frame_done:
         elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
