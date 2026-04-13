@@ -581,27 +581,28 @@ static int scan_fn(void *data)
 
         for (row = 0; row < scan_rows; row++) {
             /* Set row address THEN latch — must happen in dark time */
-            set_address(row);
-            latch_pulse();
             for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
                 u32 *row_data = &scan_buf[
                     plane * scan_rows * width + row * width];
-
-                /* Clock in data while previous OE pulse is still running */
-                for (col = 0; col < width; col++) {
-                    gpio_write_masked_bits(row_data[col], color_clk_mask);
-                    gpio_set_bits(BIT(gpio_clk));
-                }
-
-                /* Clear color and clock lines after clocking */
-                gpio_clr_bits(color_clk_mask);
-
-                /* Wait for previous OE pulse to finish */
-                if (pwm_wait_pulse_done())
-                {
-                    goto frame_done;
-                }
                     
+                    /* Clock in data while previous OE pulse is still running */
+                    for (col = 0; col < width; col++) {
+                        gpio_write_masked_bits(row_data[col], color_clk_mask);
+                        gpio_set_bits(BIT(gpio_clk));
+                    }
+                    
+                    /* Clear color and clock lines after clocking */
+                    gpio_clr_bits(color_clk_mask);
+                    
+                    /* Wait for previous OE pulse to finish */
+                    if (pwm_wait_pulse_done())
+                    {
+                        goto frame_done;
+                    }
+                    
+                /* Only set the address once per plane */
+                if (plane == 0) set_address(row);
+                latch_pulse();
                 /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
             }
