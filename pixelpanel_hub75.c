@@ -610,6 +610,13 @@ static int scan_fn(void *data)
         /* Wait for last pulse */
         pwm_wait_pulse_done();
 
+        /* Clear shift registers to prevent ghosting on first row */
+        for (col = 0; col < width; col++) {
+            gpio_clr_bits(color_clk_mask);
+            gpio_set_bits(BIT(gpio_clk));
+        }
+        gpio_clr_bits(color_clk_mask);
+
 frame_done:
         elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
         if (elapsed_us < target_frame_us) {
