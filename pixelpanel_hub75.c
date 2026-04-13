@@ -14,6 +14,8 @@
 #include <linux/hrtimer.h>
 #include <linux/sched.h>
 #include <linux/sched/rt.h>
+#include <linux/wait.h>
+#include <linux/atomic.h>
 
 #include "pixelpanel.h"
 #include "header_to_pin.h"
@@ -50,6 +52,9 @@
 #define PLLD_FREQ_MHZ   500
 #define NS_PER_TICK      (1000 / (PLLD_FREQ_MHZ / PWM_CLK_DIVIDER))  /* = 4 */
 
+static DECLARE_WAIT_QUEUE_HEAD(vsync_wait);
+static atomic_t vsync_count = ATOMIC_INIT(0);
+
 static struct fb_info *f_info;
 static int gpio_r1, gpio_g1, gpio_b1;
 static int gpio_r2, gpio_g2, gpio_b2;
@@ -77,7 +82,7 @@ static u32 *back_masks_buf;
 static struct task_struct *refresh_thread;
 static struct task_struct *compute_thread;
 
-static uint gamma_preset = 2;  /* default: 2.2 */
+static uint gamma_preset = 1;  /* default: 2.2 */
 static uint brightness = 50;
 static uint refresh_rate = 120;
 static uint base_ticks = 0;
@@ -158,6 +163,21 @@ enum color_idx_bits {
     IDX_G2 = 4,
     IDX_B2 = 5,
 };
+
+
+void pp_signal_vsync(void)
+{
+    atomic_inc(&vsync_count);
+    wake_up_interruptible(&vsync_wait);
+}
+
+
+int pp_wait_vsync(void)
+{
+    int cur = atomic_read(&vsync_count);
+    return wait_event_interruptible(vsync_wait,
+                                    atomic_read(&vsync_count) != cur);
+}
 
 
 static void assign_pins(void)
@@ -602,7 +622,6 @@ static int scan_fn(void *data)
                     
                 /* Only set the address once per plane */
                 if (plane == 0) set_address(row);
-                gpio_set_bits(BIT((gpio_oe)));
                 latch_pulse();
                 /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
@@ -613,6 +632,9 @@ static int scan_fn(void *data)
         pwm_wait_pulse_done();
 
 frame_done:
+
+        pp_signal_vsync();
+
         elapsed_us = ktime_to_us(ktime_get()) - start_time_us;
         if (elapsed_us < target_frame_us) {
             u32 remaining_us = target_frame_us - elapsed_us;

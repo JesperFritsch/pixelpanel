@@ -178,7 +178,27 @@ static int pp_mmap(struct fb_info *info, struct vm_area_struct *vma)
 
 static int pp_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
+    /* Validate the pan request */
+    if (var->xoffset + info->var.xres > info->var.xres_virtual)
+        return -EINVAL;
+    if (var->yoffset + info->var.yres > info->var.yres_virtual)
+        return -EINVAL;
+
+    info->var.xoffset = var->xoffset;
+    info->var.yoffset = var->yoffset;
+
     return 0;
+}
+
+
+static int pp_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+{
+    switch (cmd) {
+    case FBIO_WAITFORVSYNC:
+        return pp_wait_vsync();
+    default:
+        return -ENOTTY;
+    }
 }
 
 
@@ -191,6 +211,7 @@ static const struct fb_ops pp_ops = {
     .fb_pan_display = pp_pan_display,
 	__FB_DEFAULT_SYSMEM_OPS_DRAW,
 	.fb_mmap	= pp_mmap,
+    .fb_ioctl = pp_ioctl
 };
 
 
@@ -224,11 +245,11 @@ static int pp_probe(struct platform_device *dev)
         return -EINVAL;
     }
 
-    /* Make sure virtual dimensions are set and are larger or equal to actual dimensions */
+    /* Make sure virtual dimensions are set and virtual height is 2x actual height for double buffering */
     if (v_width == 0)
         v_width = (dt_v_width) ? dt_v_width : width;
     if (v_height == 0)
-        v_height = (dt_v_height) ? dt_v_height : height;
+        v_height = (dt_v_height) ? dt_v_height : height * 2;
 
     if (v_width < width)
         v_width = width;
