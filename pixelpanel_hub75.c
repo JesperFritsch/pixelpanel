@@ -437,8 +437,7 @@ static void pwm_cleanup(void)
 
 static inline void set_address(int row)
 {
-    gpio_clr_bits(addr_mask);
-    gpio_set_bits(addr_set_masks[row]);
+    gpio_write_masked_bits(addr_set_masks[row], addr_mask);
 }
 
 
