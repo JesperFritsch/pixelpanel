@@ -353,33 +353,10 @@ static void gpio_set_alt(int pin, int alt)
 }
 
 
-static int check_pwm_in_use(void)
-{
-    int reg = gpio_oe / 10;
-    int shift = (gpio_oe % 10) * 3;
-    u32 val = readl(gpio_base + GPIO_FSEL0 + reg * 4);
-    u32 mode = (val >> shift) & 0x7;
-
-    /* ALT5 = 2, meaning PWM is configured on this pin */
-    if (mode == GPIO_FSEL_ALT5) {
-        pr_err("GPIO %d already in PWM mode — is another display driver running?\n", gpio_oe);
-        return -EBUSY;
-    }
-    return 0;
-}
-
-
 static int pwm_init_hw(void)
 {
     int timeout;
     u32 ctl;
-
-    /* Check if PWM is already in use */
-    ctl = readl(pwm_base + PWM_CTL);
-    if (ctl & PWM_CTL_PWEN1) {
-        pr_err("PWM already in use — is another display driver running?\n");
-        return -EBUSY;
-    }
 
     /* Hard stop everything */
     writel(0, pwm_base + PWM_CTL);
