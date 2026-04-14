@@ -294,10 +294,15 @@ static void unmap_peripherals(void)
 {
     if (clk_base)
         iounmap(clk_base);
+        clk_base = NULL;
+
     if (pwm_base)
         iounmap(pwm_base);
+        pwm_base = NULL;
+
     if (gpio_base)
         iounmap(gpio_base);
+        gpio_base = NULL;
 }
 
 
