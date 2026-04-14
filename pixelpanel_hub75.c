@@ -342,6 +342,22 @@ static void gpio_set_alt(int pin, int alt)
 }
 
 
+static int check_pwm_in_use(void)
+{
+    int reg = gpio_oe / 10;
+    int shift = (gpio_oe % 10) * 3;
+    u32 val = readl(gpio_base + GPIO_FSEL0 + reg * 4);
+    u32 mode = (val >> shift) & 0x7;
+
+    /* ALT5 = 2, meaning PWM is configured on this pin */
+    if (mode == GPIO_FSEL_ALT5) {
+        pr_err("GPIO %d already in PWM mode — is another display driver running?\n", gpio_oe);
+        return -EBUSY;
+    }
+    return 0;
+}
+
+
 static int pwm_init_hw(void)
 {
     int timeout;
@@ -697,6 +713,12 @@ int pp_renderer_init(struct fb_info *info)
     ret = map_peripherals();
     if (ret)
         return ret;
+
+    ret = check_pwm_in_use();
+    if (ret) {
+        unmap_peripherals();
+        return ret;
+    }
 
     configure_gpio_outputs();
     ret = pwm_init_hw();
