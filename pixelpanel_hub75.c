@@ -85,7 +85,7 @@ static u32 *back_masks_buf;
 static struct task_struct *refresh_thread;
 static struct task_struct *compute_thread;
 
-static uint gamma_preset = 1;  /* default: 2.2 */
+static uint gamma_preset = 2;  /* default: 2.2 */
 static uint brightness = 50;
 static uint refresh_rate = 120;
 static uint base_ticks = 0;
@@ -138,7 +138,7 @@ module_param(base_ticks, uint, 0644);
 MODULE_PARM_DESC(base_ticks, "PWM base duration for LSB bit plane in clock ticks, higher = brighter (default 0=auto)");
 
 module_param(gpio_slowdown, uint, 0644);
-MODULE_PARM_DESC(gpio_slowdown, "GPIO slowdown factor, higher = slower but more stable (default 1)");
+MODULE_PARM_DESC(gpio_slowdown, "GPIO slowdown factor, higher = slower but more stable (default 0)");
 
 
 static const struct of_device_id gpio_of_match[] = {
@@ -445,10 +445,9 @@ static int pwm_wait_pulse_done(int plane)
 {
     u32 expected_ticks = base_ticks << plane;
     u32 max_ticks = expected_ticks * 10;
+    u32 expected_us = (expected_ticks * NS_PER_TICK) / 1000;
     ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
 
-    /* Sleep during long pulses to reduce CPU usage */
-    u32 expected_us = (expected_ticks * NS_PER_TICK) / 1000;
     if (expected_us > MIN_SLEEP_US + SLEEP_JITTER_US) {
         u32 sleep_us = expected_us - SLEEP_JITTER_US;
         usleep_range(sleep_us, sleep_us + 10);
@@ -622,7 +621,7 @@ static int scan_fn(void *data)
         start_time_us = ktime_to_us(ktime_get());
 
         scan_buf = front_masks_buf;
-
+        int prev_plane = -1;
         for (row = 0; row < scan_rows; row++) {
             /* Set row address THEN latch — must happen in dark time */
             for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
@@ -639,9 +638,9 @@ static int scan_fn(void *data)
                 gpio_clr_bits(color_clk_mask);
                 
                 /* Wait for previous OE pulse to finish */
-                if (pwm_wait_pulse_done(plane))
-                {
-                    goto frame_done;
+                if (prev_plane >= 0) {
+                    if (pwm_wait_pulse_done(prev_plane))
+                        goto frame_done;
                 }
                     
                 /* Only set the address once per plane */
@@ -649,6 +648,7 @@ static int scan_fn(void *data)
                 latch_pulse();
                 /* Start OE pulse for this bit plane */
                 pwm_send_pulse(plane);
+                prev_plane = plane;
             }
         }
 
@@ -784,7 +784,7 @@ void pp_renderer_stop(void)
         kthread_stop(refresh_thread);
         refresh_thread = NULL;
     }
-    if (pwm_base)
+    if (pwm_base && gpio_base)
         pwm_cleanup();
     if (gpio_base)
         gpio_set_bits(BIT(gpio_oe));
@@ -794,6 +794,8 @@ void pp_renderer_stop(void)
 void pp_renderer_remove(void)
 {
     unmap_peripherals();
-    vfree(front_masks_buf);
-    vfree(back_masks_buf);
+    if (front_masks_buf)
+        vfree(front_masks_buf);
+    if (back_masks_buf)
+        vfree(back_masks_buf);
 }
