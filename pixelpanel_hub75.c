@@ -356,7 +356,6 @@ static void gpio_set_alt(int pin, int alt)
 static int pwm_init_hw(void)
 {
     int timeout;
-    u32 ctl;
 
     /* Hard stop everything */
     writel(0, pwm_base + PWM_CTL);
