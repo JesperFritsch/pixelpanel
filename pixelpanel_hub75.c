@@ -293,16 +293,22 @@ err_gpio:
 static void unmap_peripherals(void)
 {
     if (clk_base)
+    {
         iounmap(clk_base);
         clk_base = NULL;
+    }
 
     if (pwm_base)
+    {
         iounmap(pwm_base);
         pwm_base = NULL;
+    }
 
     if (gpio_base)
+    {
         iounmap(gpio_base);
         gpio_base = NULL;
+    }
 }
 
 
@@ -718,12 +724,6 @@ int pp_renderer_init(struct fb_info *info)
     ret = map_peripherals();
     if (ret)
         return ret;
-
-    ret = check_pwm_in_use();
-    if (ret) {
-        unmap_peripherals();
-        return ret;
-    }
 
     configure_gpio_outputs();
     ret = pwm_init_hw();
