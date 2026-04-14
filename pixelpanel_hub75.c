@@ -52,6 +52,9 @@
 #define PLLD_FREQ_MHZ   500
 #define NS_PER_TICK      (1000 / (PLLD_FREQ_MHZ / PWM_CLK_DIVIDER))  /* = 4 */
 
+#define SLEEP_JITTER_US 50  /* safety margin for sleep imprecision */
+#define MIN_SLEEP_US    100 /* don't bother sleeping for less than this */
+
 static DECLARE_WAIT_QUEUE_HEAD(vsync_wait);
 static atomic_t vsync_count = ATOMIC_INIT(0);
 
@@ -397,13 +400,7 @@ static void pwm_init_hw(void)
  */
 static void pwm_send_pulse(int plane)
 {
-    u32 range = (base_ticks * brightness) / 100;
-    u32 total;
-
-    if (range < 1)
-        range = 1;
-
-    total = range << plane;
+    u32 total = base_ticks << plane;
 
     if (total <= 16) {
         *pwm_rng1_reg = total; 
@@ -427,14 +424,23 @@ static void pwm_send_pulse(int plane)
 }
 
 
-static int pwm_wait_pulse_done(void)
+static int pwm_wait_pulse_done(int plane)
 {
-    u32 max_ticks = (base_ticks << MAX_BIT_PLANES) * 10;
+    u32 expected_ticks = base_ticks << plane;
+    u32 max_ticks = expected_ticks * 10;
     ktime_t deadline = ktime_add_ns(ktime_get(), (u64)max_ticks * NS_PER_TICK);
 
+    /* Sleep during long pulses to reduce CPU usage */
+    u32 expected_us = (expected_ticks * NS_PER_TICK) / 1000;
+    if (expected_us > MIN_SLEEP_US + SLEEP_JITTER_US) {
+        u32 sleep_us = expected_us - SLEEP_JITTER_US;
+        usleep_range(sleep_us, sleep_us + 10);
+    }
+
+    /* Busy-wait the remainder for precise completion */
     while (!(*pwm_sta_reg & PWM_STA_EMPT1)) {
         if (ktime_after(ktime_get(), deadline)) {
-            pr_warn("PWM pulse timeout\n");
+            pr_warn("PWM pulse timeout on plane %d\n", plane);
             break;
         }
     }
@@ -552,6 +558,7 @@ static void compute_set_masks(u32 *masks_buffer)
     u32 xoff = f_info->var.xoffset;
     u32 *pixels = (u32 *)f_info->screen_buffer;
     const u8 *gamma = gamma_tables[gamma_preset < NUM_GAMMA_PRESETS ? gamma_preset : 0];
+    u32 bright = brightness;
     int plane, row, col;
 
     for (plane = 0; plane < MAX_BIT_PLANES; plane++) {
@@ -565,13 +572,13 @@ static void compute_set_masks(u32 *masks_buffer)
                 u32 pxl_top = row_top[col];
                 u32 pxl_bot = row_bot[col];
 
-                u32 gt = (gamma[(pxl_top >> r_off) & 0xFF] << r_off) |
-                         (gamma[(pxl_top >> g_off) & 0xFF] << g_off) |
-                         (gamma[(pxl_top >> b_off) & 0xFF] << b_off);
+                u32 gt = (gamma[(((pxl_top >> r_off) & 0xFF) * bright) / 100] << r_off) |
+                         (gamma[(((pxl_top >> g_off) & 0xFF) * bright) / 100] << g_off) |
+                         (gamma[(((pxl_top >> b_off) & 0xFF) * bright) / 100] << b_off);
 
-                u32 gb = (gamma[(pxl_bot >> r_off) & 0xFF] << r_off) |
-                         (gamma[(pxl_bot >> g_off) & 0xFF] << g_off) |
-                         (gamma[(pxl_bot >> b_off) & 0xFF] << b_off);
+                u32 gb = (gamma[(((pxl_bot >> r_off) & 0xFF) * bright) / 100] << r_off) |
+                         (gamma[(((pxl_bot >> g_off) & 0xFF) * bright) / 100] << g_off) |
+                         (gamma[(((pxl_bot >> b_off) & 0xFF) * bright) / 100] << b_off);
 
                 u8 idx = lut_index(gt, gb, bit, r_off, g_off, b_off);
 
@@ -615,7 +622,7 @@ static int scan_fn(void *data)
                 gpio_clr_bits(color_clk_mask);
                 
                 /* Wait for previous OE pulse to finish */
-                if (pwm_wait_pulse_done())
+                if (pwm_wait_pulse_done(plane))
                 {
                     goto frame_done;
                 }
@@ -629,7 +636,7 @@ static int scan_fn(void *data)
         }
 
         /* Wait for last pulse */
-        pwm_wait_pulse_done();
+        pwm_wait_pulse_done(MAX_BIT_PLANES - 1);
 
 frame_done:
 
