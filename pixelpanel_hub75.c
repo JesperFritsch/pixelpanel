@@ -342,15 +342,23 @@ static void gpio_set_alt(int pin, int alt)
 }
 
 
-static void pwm_init_hw(void)
+static int pwm_init_hw(void)
 {
     int timeout;
+    u32 ctl;
+
+    /* Check if PWM is already in use */
+    ctl = readl(pwm_base + PWM_CTL);
+    if (ctl & PWM_CTL_PWEN1) {
+        pr_err("PWM already in use — is another display driver running?\n");
+        return -EBUSY;
+    }
 
     /* Hard stop everything */
     writel(0, pwm_base + PWM_CTL);
     udelay(10);
 
-    /* Kill the clock — try multiple times */
+    /* Kill the clock */
     writel(CM_PASSWORD | (1 << 5), clk_base + CM_PWMCTL);
     udelay(100);
 
@@ -365,13 +373,11 @@ static void pwm_init_hw(void)
         udelay(10);
     }
 
-    /* Disable clock source completely */
     writel(CM_PASSWORD, clk_base + CM_PWMCTL);
     udelay(100);
 
-    /* Now configure fresh */
     writel(CM_PASSWORD | (PWM_CLK_DIVIDER << 12), clk_base + CM_PWMDIV);
-    writel(CM_PASSWORD | (1 << 4) | 6, clk_base + CM_PWMCTL);  /* ENAB | SRC=PLLD */
+    writel(CM_PASSWORD | (1 << 4) | 6, clk_base + CM_PWMCTL);
     udelay(10);
 
     timeout = 1000;
@@ -383,15 +389,15 @@ static void pwm_init_hw(void)
         udelay(10);
     }
 
-    /* Set GPIO 18 to ALT5 (PWM0) */
     gpio_set_alt(gpio_oe, GPIO_FSEL_ALT5);
 
-    /* Clear FIFO and configure */
     writel(PWM_CTL_CLRF1, pwm_base + PWM_CTL);
     udelay(10);
 
     writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
            pwm_base + PWM_CTL);
+
+    return 0;
 }
 
 
@@ -693,7 +699,11 @@ int pp_renderer_init(struct fb_info *info)
         return ret;
 
     configure_gpio_outputs();
-    pwm_init_hw();
+    ret = pwm_init_hw();
+    if (ret) {
+        unmap_peripherals();
+        return ret;
+    }
     build_color_set_mask_lut();
     build_addr_lut();
 
