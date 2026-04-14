@@ -344,41 +344,52 @@ static void gpio_set_alt(int pin, int alt)
 
 static void pwm_init_hw(void)
 {
-    /* Stop PWM */
-    writel(PWM_CTL_CLRF1, pwm_base + PWM_CTL);
+    int timeout;
+
+    /* Hard stop everything */
+    writel(0, pwm_base + PWM_CTL);
     udelay(10);
 
-    /* Kill the clock */
-    writel(CM_PASSWORD | (1 << 5), clk_base + CM_PWMCTL);  /* KILL bit */
-    udelay(10);
-    while (readl(clk_base + CM_PWMCTL) & 0x80)  /* wait for BUSY to clear */
-        udelay(1);
+    /* Kill the clock — try multiple times */
+    writel(CM_PASSWORD | (1 << 5), clk_base + CM_PWMCTL);
+    udelay(100);
 
-    /*
-     * Source = PLLD (500 MHz on all Pi models).
-     * CLK_SRC_PLLD = 6.
-     * Divider: pick something that gives useful resolution.
-     * hzeller computes this from the base nanosecond timing,
-     * but a divider of 2 gives 250 MHz = 4 ns per tick,
-     * which is plenty fine for OE pulses in the microsecond range.
-     */
+    timeout = 1000;
+    while (readl(clk_base + CM_PWMCTL) & 0x80) {
+        if (--timeout <= 0) {
+            pr_warn("clock BUSY stuck, forcing kill\n");
+            writel(CM_PASSWORD | (1 << 5), clk_base + CM_PWMCTL);
+            udelay(100);
+            break;
+        }
+        udelay(10);
+    }
+
+    /* Disable clock source completely */
+    writel(CM_PASSWORD, clk_base + CM_PWMCTL);
+    udelay(100);
+
+    /* Now configure fresh */
     writel(CM_PASSWORD | (PWM_CLK_DIVIDER << 12), clk_base + CM_PWMDIV);
     writel(CM_PASSWORD | (1 << 4) | 6, clk_base + CM_PWMCTL);  /* ENAB | SRC=PLLD */
     udelay(10);
-    while (!(readl(clk_base + CM_PWMCTL) & 0x80))  /* wait for BUSY */
-        udelay(1);
+
+    timeout = 1000;
+    while (!(readl(clk_base + CM_PWMCTL) & 0x80)) {
+        if (--timeout <= 0) {
+            pr_warn("clock failed to start\n");
+            break;
+        }
+        udelay(10);
+    }
 
     /* Set GPIO 18 to ALT5 (PWM0) */
     gpio_set_alt(gpio_oe, GPIO_FSEL_ALT5);
 
-    /*
-     * Configure PWM:
-     * - USEF1: use FIFO instead of DAT register
-     * - POLA1: invert polarity (so silence = OE high = display off)
-     * - CLRF1: clear the FIFO
-     * SBIT1 stays 0, so when FIFO is empty the output is low,
-     * but POLA1 inverts it to high → OE inactive.
-     */
+    /* Clear FIFO and configure */
+    writel(PWM_CTL_CLRF1, pwm_base + PWM_CTL);
+    udelay(10);
+
     writel(PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1,
            pwm_base + PWM_CTL);
 }
